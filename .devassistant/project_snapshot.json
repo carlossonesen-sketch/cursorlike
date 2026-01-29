@@ -1,0 +1,39 @@
+{
+  "detectedTypes": [
+    "Node/TS",
+    "C/C++",
+    "PowerShell",
+    "Tauri",
+    "Next.js"
+  ],
+  "recommendedPacks": [
+    "node",
+    "typescript",
+    "cpp",
+    "powershell",
+    "tauri",
+    "nextjs"
+  ],
+  "enabledPacks": [
+    "node",
+    "typescript",
+    "cpp",
+    "powershell",
+    "tauri",
+    "nextjs"
+  ],
+  "importantFiles": [
+    "app/package.json",
+    "app/src-tauri/tauri.conf.json",
+    "app/tsconfig.json",
+    "source/DevAssistant/_internal/pyarrow/src/arrow/python/CMakeLists.txt",
+    "source/DevAssistant/_internal/pyarrow/src/arrow/python/vendored/CMakeLists.txt"
+  ],
+  "detectedCommands": {
+    "build": "npm run build",
+    "test": "npm test",
+    "lint": "npm run lint",
+    "dev": "npm run dev"
+  },
+  "generatedAt": "2026-01-29T22:34:58.977Z"
+}

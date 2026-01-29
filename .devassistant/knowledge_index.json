@@ -1,0 +1,126 @@
+{
+  "fileHashes": {
+    "knowledge/languages/powershell/index.md": "5445627b",
+    "knowledge/languages/python/async.md": "5fb5f148",
+    "knowledge/languages/python/index.md": "147fbfe1"
+  },
+  "chunks": [
+    {
+      "id": "k-knowledge/languages/powershell/index.md-0-5445627b",
+      "sourcePath": "knowledge/languages/powershell/index.md",
+      "title": "Rules",
+      "chunkText": "# PowerShell Pack",
+      "tags": [
+        "languages",
+        "powershell",
+        "index"
+      ],
+      "contentHash": "5445627b",
+      "updatedAt": "2026-01-29T17:21:41.737Z"
+    },
+    {
+      "id": "k-knowledge/languages/powershell/index.md-1-5445627b",
+      "sourcePath": "knowledge/languages/powershell/index.md",
+      "title": "Rules",
+      "chunkText": "## Rules\n- Prefer Set-StrictMode -Version Latest in scripts you control.\n- Use $ErrorActionPreference = \"Stop\" for fail-fast automation.\n- Use Join-Path over manual path concatenation.\n- Quote paths with spaces.",
+      "tags": [
+        "languages",
+        "powershell",
+        "index"
+      ],
+      "contentHash": "5445627b",
+      "updatedAt": "2026-01-29T17:21:41.737Z"
+    },
+    {
+      "id": "k-knowledge/languages/powershell/index.md-2-5445627b",
+      "sourcePath": "knowledge/languages/powershell/index.md",
+      "title": "Common project ops",
+      "chunkText": "## Common project ops\n- Repo search: Get-ChildItem -Recurse -Filter *.ts\n- Grep: Select-String -Path .\\src\\*.ts -Pattern \"TODO\" -Recurse\n- JSON: Get-Content file.json | ConvertFrom-Json\n- Invoke: & .\\script.ps1 -Arg value",
+      "tags": [
+        "languages",
+        "powershell",
+        "index"
+      ],
+      "contentHash": "5445627b",
+      "updatedAt": "2026-01-29T17:21:41.737Z"
+    },
+    {
+      "id": "k-knowledge/languages/powershell/index.md-3-5445627b",
+      "sourcePath": "knowledge/languages/powershell/index.md",
+      "title": "Gotchas",
+      "chunkText": "## Gotchas\n- ExecutionPolicy on new machines\n- Backticks vs quotes, line continuation\n- PowerShell vs CMD escaping for curl/json",
+      "tags": [
+        "languages",
+        "powershell",
+        "index"
+      ],
+      "contentHash": "5445627b",
+      "updatedAt": "2026-01-29T17:21:41.737Z"
+    },
+    {
+      "id": "k-knowledge/languages/python/async.md-0-5fb5f148",
+      "sourcePath": "knowledge/languages/python/async.md",
+      "title": "Python async / asyncio",
+      "chunkText": "# Python async / asyncio",
+      "tags": [
+        "languages",
+        "python",
+        "async"
+      ],
+      "contentHash": "5fb5f148",
+      "updatedAt": "2026-01-29T17:21:41.737Z"
+    },
+    {
+      "id": "k-knowledge/languages/python/async.md-1-5fb5f148",
+      "sourcePath": "knowledge/languages/python/async.md",
+      "title": "Common pitfalls",
+      "chunkText": "## Common pitfalls\r\n\r\n- Forgetting to `await` coroutines: you get a coroutine object, not the result.\r\n- Mixing sync and async: avoid blocking calls inside async def; use `run_in_executor` if needed.\r\n- Not closing the event loop or not using `async with` for resources.",
+      "tags": [
+        "languages",
+        "python",
+        "async"
+      ],
+      "contentHash": "5fb5f148",
+      "updatedAt": "2026-01-29T17:21:41.737Z"
+    },
+    {
+      "id": "k-knowledge/languages/python/async.md-2-5fb5f148",
+      "sourcePath": "knowledge/languages/python/async.md",
+      "title": "Fixing async bugs",
+      "chunkText": "## Fixing async bugs\r\n\r\n1. Ensure all async functions are defined with `async def` and called with `await`.\r\n2. Use `asyncio.run()` at the top level to start the event loop.\r\n3. Prefer `async with` for aiohttp, aiofiles, and other async context managers.",
+      "tags": [
+        "languages",
+        "python",
+        "async"
+      ],
+      "contentHash": "5fb5f148",
+      "updatedAt": "2026-01-29T17:21:41.737Z"
+    },
+    {
+      "id": "k-knowledge/languages/python/async.md-3-5fb5f148",
+      "sourcePath": "knowledge/languages/python/async.md",
+      "title": "Testing async code",
+      "chunkText": "## Testing async code\r\n\r\n- Use `pytest-asyncio` and mark tests with `@pytest.mark.asyncio`.\r\n- Or use `asyncio.run()` inside a sync test to run a single coroutine.",
+      "tags": [
+        "languages",
+        "python",
+        "async"
+      ],
+      "contentHash": "5fb5f148",
+      "updatedAt": "2026-01-29T17:21:41.737Z"
+    },
+    {
+      "id": "k-knowledge/languages/python/index.md-0-147fbfe1",
+      "sourcePath": "knowledge/languages/python/index.md",
+      "title": "index",
+      "chunkText": "RULE_TEST_UNIQUE: Prefer asyncio.run() at top-level; avoid nested event loops.\r\n\nRULE_TEST_UNIQUE: Prefer asyncio.run() at top-level; avoid nested event loops.",
+      "tags": [
+        "languages",
+        "python",
+        "index"
+      ],
+      "contentHash": "147fbfe1",
+      "updatedAt": "2026-01-29T17:21:41.737Z"
+    }
+  ]
+}

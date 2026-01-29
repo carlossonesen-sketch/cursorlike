@@ -1,0 +1,1 @@
+export { KnowledgeStore } from "./KnowledgeStore";
