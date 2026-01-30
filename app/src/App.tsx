@@ -31,6 +31,10 @@ import {
   DEFAULT_LOCAL_SETTINGS,
   getRequestedFileHint,
   readProjectFile,
+  extractFileMentions,
+  hasDiffRequest,
+  routeMessage,
+  hasFileEditIntent,
 } from "./core";
 import type {
   FileTreeNode,
@@ -51,7 +55,36 @@ import "./App.css";
 
 const workspace = new WorkspaceService();
 
+async function sha256Prefix(content: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
+  const hex = Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  return hex.slice(0, 8);
+}
+
 type AppState = "idle" | "patchProposed" | "patchApplied";
+
+export type FileEditSaveStatus = "idle" | "saving" | "saved" | "error";
+
+export interface FileEditVerifyInfo {
+  absolutePath: string;
+  fileSizeBytes: number;
+  contentHashPrefix: string;
+}
+
+export interface FileEditState {
+  relativePath: string;
+  baselineText: string;
+  baselineUpdatedAt: number;
+  originalText: string;
+  editedText: string;
+  dirty: boolean;
+  lastSaveStatus: FileEditSaveStatus;
+  savedAt?: number;
+  saveError?: string;
+  verifyInfo?: FileEditVerifyInfo;
+}
 
 interface Message {
   id: string;
@@ -80,6 +113,7 @@ export default function App() {
   const [applyInProgress, setApplyInProgress] = useState(false);
   const [statusLine, setStatusLine] = useState<string | null>(null);
   const [showDiffPanel, setShowDiffPanel] = useState(false);
+  const [fileEditState, setFileEditState] = useState<FileEditState | null>(null);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [resume, setResume] = useState<ResumeSuggestion | null>(null);
   const [agentMode, setAgentMode] = useState<AgentMode>("Coder");
@@ -95,10 +129,11 @@ export default function App() {
   const [modelPath, setModelPath] = useState<string | undefined>(undefined);
   const [toolRoot, setToolRoot] = useState<string | null>(null);
   const [port, setPort] = useState<number>(11435);
-  const [provider, setProvider] = useState<Provider>("mock");
+  const [provider, setProvider] = useState<Provider>("local");
   const [localSettings, setLocalSettings] = useState<LocalModelSettings>(() => ({
     ...DEFAULT_LOCAL_SETTINGS,
   }));
+  const [lastFileChoiceCandidates, setLastFileChoiceCandidates] = useState<string[] | null>(null);
   const localSettingsRef = useRef(localSettings);
   const toolRootRef = useRef<string | null>(null);
   const portRef = useRef<number>(11435);
@@ -291,6 +326,42 @@ export default function App() {
       const p = (prompt || "").trim() || "(no prompt)";
       setMessages((prev) => [...prev, { id: `u-${Date.now()}`, role: "user", text: p }]);
 
+      const num = /^\s*(\d+)\s*$/.exec(p);
+      if (lastFileChoiceCandidates && num) {
+        const idx = parseInt(num[1], 10);
+        if (idx >= 1 && idx <= lastFileChoiceCandidates.length) {
+          const chosenPath = lastFileChoiceCandidates[idx - 1];
+          setLastFileChoiceCandidates(null);
+          try {
+            const content = await workspace.readFile(chosenPath);
+            setShowDiffPanel(true);
+            setFileEditState({
+              relativePath: chosenPath,
+              baselineText: content,
+              baselineUpdatedAt: Date.now(),
+              originalText: content,
+              editedText: content,
+              dirty: false,
+              lastSaveStatus: "idle",
+            });
+            console.log("OPEN_EDITOR", { relativePath: chosenPath, length: content.length });
+            console.log("DIFF_PANEL_VISIBLE", true);
+            setMessages((prev) => [
+              ...prev,
+              { id: `a-${Date.now()}`, role: "assistant", text: `Opened ${chosenPath} in editor.` },
+            ]);
+          } catch (e) {
+            console.error("sendChatMessage file choice", e);
+            setMessages((prev) => [
+              ...prev,
+              { id: `a-${Date.now()}`, role: "assistant", text: `Error: ${String(e)}` },
+            ]);
+          }
+          return;
+        }
+      }
+      setLastFileChoiceCandidates(null);
+
       if (p.startsWith("/")) {
         const cmd = p.slice(1).trim().toLowerCase().split(/\s+/)[0] || "";
         let reply: string;
@@ -310,9 +381,30 @@ export default function App() {
         return;
       }
 
-      const fileHint = getRequestedFileHint(p);
-      if (fileHint) {
-        const result = await readProjectFile(root, fileHint, (path) => workspace.readFile(path), (path) => workspace.exists(path));
+      // ROUTING: Check for file workflow FIRST, before any chat logic
+      const routing = routeMessage(p);
+      console.log("MESSAGE_ROUTING:", routing);
+      
+      if (routing.route === "file") {
+        const fileHint = routing.hint;
+        const result = await readProjectFile(
+          root,
+          fileHint,
+          (path) => workspace.readFile(path),
+          (path) => workspace.exists(path),
+          (wr, name) => workspace.searchFilesByName(wr, name)
+        );
+        if ("error" in result && result.error === "multiple") {
+          const list = result.candidates
+            .map((path, i) => `${i + 1}. ${path}`)
+            .join("\n");
+          setLastFileChoiceCandidates(result.candidates);
+          setMessages((prev) => [
+            ...prev,
+            { id: `a-${Date.now()}`, role: "assistant", text: `Which file?\n${list}\n\nReply with a number.` },
+          ]);
+          return;
+        }
         if ("error" in result) {
           setMessages((prev) => [
             ...prev,
@@ -320,45 +412,82 @@ export default function App() {
           ]);
           return;
         }
-        const injectedPrompt = `--- FILE: ${result.path} ---\n${result.content}\n--- END FILE ---\n\nUser request: ${p}`;
-        setStatusLine("Generating reply…");
-        try {
-          const inspector = new ProjectInspector(workspace);
-          const m = manifest ?? (await inspector.buildManifest());
-          if (!manifest) setManifest(m);
-          const ctxBuilder = new ContextBuilder(workspace, m);
-          const knowledgeStore = useKnowledgePacks ? new KnowledgeStore(root, workspace) : null;
-          const ctx = await ctxBuilder.build(injectedPrompt, selectedPaths, {
-            useKnowledge: useKnowledgePacks,
-            knowledgeStore: knowledgeStore ?? undefined,
-            agentRole: "coder",
-            projectSnapshot: projectSnapshot ?? undefined,
-            enabledPacks: enabledPacks.length ? enabledPacks : undefined,
-          });
-          setLastRetrievedChunks(
-            ctx.knowledgeChunks?.map((c) => ({
-              title: c.title,
-              sourcePath: c.sourcePath,
-              chunkText: c.chunkText,
-            })) ?? []
-          );
-          const text = await generateChatResponse(ctx);
-          setMessages((prev) => [
-            ...prev,
-            { id: `a-${Date.now()}`, role: "assistant", text },
-          ]);
-        } catch (e) {
-          console.error("sendChatMessage", e);
-          setMessages((prev) => [
-            ...prev,
-            { id: `a-${Date.now()}`, role: "assistant", text: `Error: ${String(e)}` },
-          ]);
-        } finally {
-          setStatusLine(null);
+        const resolvedPath = result.path;
+        const originalText = result.content;
+        const diffRequest = hasDiffRequest(p);
+        
+        if (diffRequest) {
+          setStatusLine("Generating patch…");
+          try {
+            setFileEditState(null);
+            setSelectedPaths([resolvedPath]);
+            const inspector = new ProjectInspector(workspace);
+            const m = manifest ?? (await inspector.buildManifest());
+            if (!manifest) setManifest(m);
+            const ctxBuilder = new ContextBuilder(workspace, m);
+            const knowledgeStore = useKnowledgePacks ? new KnowledgeStore(root, workspace) : null;
+            const ctx = await ctxBuilder.build(p, [resolvedPath], {
+              useKnowledge: useKnowledgePacks,
+              knowledgeStore: knowledgeStore ?? undefined,
+              agentRole: "coder",
+              projectSnapshot: projectSnapshot ?? undefined,
+              enabledPacks: enabledPacks.length ? enabledPacks : undefined,
+            });
+            const patchResult = await generatePlanAndPatch(ctx);
+            setPlanAndPatch(patchResult);
+            const engine = new PatchEngine(root, (path) => workspace.readFile(path));
+            const preview = await engine.preview(patchResult.patch);
+            const map = new Map<string, { old: string; new: string }>();
+            preview.forEach((v, k) => map.set(k, v));
+            setPreviewMap(map);
+            setSelectedDiffPath([...preview.keys()][0] ?? null);
+            setAppState("patchProposed");
+            setShowDiffPanel(true);
+            const store = new MemoryStore(root);
+            const record = await store.addProposedSession(p, [resolvedPath], patchResult.explanation, patchResult.patch);
+            setCurrentProposedSessionId(record.id);
+            await fetchSessionsAndResume();
+            setMessages((prev) => [
+              ...prev,
+              { id: `a-${Date.now()}`, role: "assistant", text: `Patch for ${resolvedPath}: ${patchResult.explanation}` },
+            ]);
+          } catch (e) {
+            console.error("sendChatMessage patch", e);
+            setMessages((prev) => [
+              ...prev,
+              { id: `a-${Date.now()}`, role: "assistant", text: `Error: ${String(e)}` },
+            ]);
+          } finally {
+            setStatusLine(null);
+          }
+          return;
         }
+        
+        setShowDiffPanel(true);
+        setFileEditState({
+          relativePath: resolvedPath,
+          baselineText: originalText,
+          baselineUpdatedAt: Date.now(),
+          originalText,
+          editedText: originalText,
+          dirty: false,
+          lastSaveStatus: "idle",
+        });
+        console.log("OPEN_EDITOR", { relativePath: resolvedPath, length: originalText.length });
+        console.log("DIFF_PANEL_VISIBLE", true);
+        const editIntent = hasFileEditIntent(p);
+        const assistantMsg = editIntent
+          ? `Opened ${resolvedPath} in editor. Make your changes in the right pane.`
+          : `Opened ${resolvedPath} in editor.`;
+        setMessages((prev) => [
+          ...prev,
+          { id: `a-${Date.now()}`, role: "assistant", text: assistantMsg },
+        ]);
         return;
       }
 
+      // ROUTING: No file mention detected - proceed with general chat
+      console.log("MESSAGE_ROUTING: chat (no file mention)");
       setStatusLine("Generating reply…");
       try {
         const inspector = new ProjectInspector(workspace);
@@ -395,7 +524,7 @@ export default function App() {
         setStatusLine(null);
       }
     },
-    [workspacePath, selectedPaths, manifest, useKnowledgePacks, projectSnapshot, enabledPacks]
+    [workspacePath, selectedPaths, manifest, useKnowledgePacks, projectSnapshot, enabledPacks, lastFileChoiceCandidates, fetchSessionsAndResume]
   );
 
   const proposePatch = useCallback(
@@ -685,8 +814,88 @@ export default function App() {
   }, [workspacePath, planAndPatch, currentProposedSessionId, fetchSessionsAndResume]);
 
   const toggleViewDiff = useCallback(() => {
-    setShowDiffPanel((v) => !v);
+    setShowDiffPanel((v) => {
+      if (v && fileEditState?.dirty && !window.confirm("Unsaved changes. Close anyway?")) return true;
+      if (v) setFileEditState(null);
+      return !v;
+    });
+  }, [fileEditState?.dirty]);
+
+  const handleFileEditChange = useCallback((editedText: string) => {
+    setFileEditState((prev) =>
+      prev ? { ...prev, editedText, dirty: editedText !== prev.originalText } : null
+    );
   }, []);
+
+  const handleFileEditSave = useCallback(async () => {
+    const root = workspace.root;
+    if (!root || !fileEditState || !fileEditState.dirty) return;
+    const { relativePath, editedText } = fileEditState;
+    setFileEditState((prev) => (prev ? { ...prev, lastSaveStatus: "saving", saveError: undefined } : null));
+    try {
+      await workspace.writeFile(root, relativePath, editedText);
+      const diskContent = await workspace.readFile(relativePath);
+      const absolutePath = await workspace.resolvePath(root, relativePath);
+      const fileSizeBytes = await workspace.getFileSize(root, relativePath);
+      const contentHashPrefix = await sha256Prefix(editedText);
+      setFileEditState((prev) =>
+        prev
+          ? {
+              ...prev,
+              originalText: diskContent,
+              editedText: diskContent,
+              dirty: false,
+              lastSaveStatus: "saved",
+              savedAt: Date.now(),
+              saveError: undefined,
+              verifyInfo: { absolutePath, fileSizeBytes, contentHashPrefix },
+            }
+          : null
+      );
+      setTimeout(() => {
+        setFileEditState((prev) =>
+          prev && prev.lastSaveStatus === "saved" ? { ...prev, lastSaveStatus: "idle" } : prev
+        );
+      }, 2000);
+    } catch (e) {
+      console.error("handleFileEditSave", e);
+      setFileEditState((prev) =>
+        prev ? { ...prev, lastSaveStatus: "error", saveError: String(e) } : null
+      );
+    }
+  }, [fileEditState]);
+
+  const handleSetBaseline = useCallback(async () => {
+    const root = workspace.root;
+    if (!root || !fileEditState) return;
+    try {
+      const diskContent = await workspace.readFile(fileEditState.relativePath);
+      setFileEditState((prev) =>
+        prev
+          ? {
+              ...prev,
+              baselineText: diskContent,
+              baselineUpdatedAt: Date.now(),
+            }
+          : null
+      );
+    } catch (e) {
+      console.error("handleSetBaseline", e);
+    }
+  }, [fileEditState]);
+
+  const handleResetToBaseline = useCallback(() => {
+    if (!fileEditState) return;
+    setFileEditState((prev) =>
+      prev
+        ? {
+            ...prev,
+            editedText: prev.baselineText,
+            dirty: prev.baselineText !== prev.originalText,
+          }
+        : null
+    );
+  }, [fileEditState]);
 
   const runChecks = useCallback(() => {
     setStatusLine("Running checks…");
@@ -855,6 +1064,11 @@ export default function App() {
           selectedDiffPath={selectedDiffPath}
           onSelectDiffPath={setSelectedDiffPath}
           readFile={readFile}
+          fileEditState={fileEditState}
+          onFileEditChange={handleFileEditChange}
+          onFileEditSave={handleFileEditSave}
+          onSetBaseline={handleSetBaseline}
+          onResetToBaseline={handleResetToBaseline}
         />
       </div>
     </div>

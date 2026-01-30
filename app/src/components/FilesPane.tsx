@@ -1,6 +1,8 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
+import { diffLines } from "diff";
 import type { FileTreeNode } from "../core/types";
 import type { SessionRecord } from "../core/types";
+import type { FileEditState } from "../App";
 import { SessionsPanel } from "./SessionsPanel";
 
 interface FilesPaneProps {
@@ -22,6 +24,11 @@ interface FilesPaneProps {
   selectedDiffPath: string | null;
   onSelectDiffPath: (path: string) => void;
   readFile: (path: string) => Promise<string>;
+  fileEditState: FileEditState | null;
+  onFileEditChange: (editedText: string) => void;
+  onFileEditSave: () => void;
+  onSetBaseline: () => void;
+  onResetToBaseline: () => void;
 }
 
 export function FilesPane({
@@ -42,10 +49,16 @@ export function FilesPane({
   selectedDiffPath,
   onSelectDiffPath,
   readFile,
+  fileEditState,
+  onFileEditChange,
+  onFileEditSave,
+  onSetBaseline,
+  onResetToBaseline,
 }: FilesPaneProps) {
   const [viewerPath, setViewerPath] = useState<string | null>(null);
   const [viewerContent, setViewerContent] = useState<string>("");
   const [viewerLoading, setViewerLoading] = useState(false);
+  const [viewMode, setViewMode] = useState<"editor" | "diff">("editor");
 
   const loadViewer = useCallback(
     async (path: string) => {
@@ -114,6 +127,11 @@ export function FilesPane({
   const current = selectedDiffPath ?? (changedFiles[0] ?? null);
   const preview = current && previewMap?.get(current);
 
+  const diffPanelVisible = Boolean(showDiffPanel && fileEditState);
+  useEffect(() => {
+    console.log("DIFF_PANEL_VISIBLE", diffPanelVisible);
+  }, [diffPanelVisible]);
+
   return (
     <div className="files-pane">
       <div className="files-section">
@@ -149,7 +167,161 @@ export function FilesPane({
         />
       </div>
       <div className="viewer-section">
-        {showDiffPanel && patch && (
+        {showDiffPanel && fileEditState && (
+          <div className="diff-panel file-edit-panel">
+            <div className="file-edit-header">
+              <h4>File: {fileEditState.relativePath}</h4>
+              <div className="file-edit-toggle">
+                <button
+                  type="button"
+                  className={viewMode === "editor" ? "active" : ""}
+                  onClick={() => setViewMode("editor")}
+                >
+                  Editor
+                </button>
+                <button
+                  type="button"
+                  className={viewMode === "diff" ? "active" : ""}
+                  onClick={() => setViewMode("diff")}
+                >
+                  Diff
+                </button>
+              </div>
+            </div>
+            {viewMode === "editor" && (
+              <div className="file-edit-rows">
+                <div className="file-edit-col">
+                  <strong>Baseline (read-only)</strong>
+                  <pre className="file-edit-original">{fileEditState.baselineText || "(empty)"}</pre>
+                </div>
+                <div className="file-edit-col">
+                  <strong>Edited</strong>
+                  <textarea
+                    className="file-edit-textarea"
+                    value={fileEditState.editedText}
+                    onChange={(e) => onFileEditChange(e.target.value)}
+                    spellCheck={false}
+                  />
+                </div>
+              </div>
+            )}
+            {viewMode === "diff" && (
+              <div className="file-edit-diff-view">
+                {(() => {
+                  const changes = diffLines(fileEditState.baselineText, fileEditState.editedText);
+                  const hasChanges = changes.some((c) => c.added || c.removed);
+                  if (!hasChanges) {
+                    return <p className="muted">No changes yet.</p>;
+                  }
+                  
+                  interface DiffRow {
+                    leftLine: string | null;
+                    rightLine: string | null;
+                    leftCls: string;
+                    rightCls: string;
+                  }
+                  
+                  const rows: DiffRow[] = [];
+                  for (const change of changes) {
+                    const lines = change.value.split(/\r?\n/);
+                    if (lines[lines.length - 1] === "") lines.pop();
+                    
+                    if (change.removed) {
+                      for (const line of lines) {
+                        rows.push({
+                          leftLine: line,
+                          rightLine: null,
+                          leftCls: "diff-cell-removed",
+                          rightCls: "diff-cell-empty",
+                        });
+                      }
+                    } else if (change.added) {
+                      for (const line of lines) {
+                        rows.push({
+                          leftLine: null,
+                          rightLine: line,
+                          leftCls: "diff-cell-empty",
+                          rightCls: "diff-cell-added",
+                        });
+                      }
+                    } else {
+                      for (const line of lines) {
+                        rows.push({
+                          leftLine: line,
+                          rightLine: line,
+                          leftCls: "diff-cell-context",
+                          rightCls: "diff-cell-context",
+                        });
+                      }
+                    }
+                  }
+                  
+                  return (
+                    <div className="diff-table">
+                      <div className="diff-table-header">
+                        <div className="diff-table-col">Baseline</div>
+                        <div className="diff-table-col">Edited</div>
+                      </div>
+                      <div className="diff-table-body">
+                        {rows.map((row, i) => (
+                          <div key={i} className="diff-table-row">
+                            <div className={`diff-table-cell ${row.leftCls}`}>
+                              {row.leftLine !== null ? row.leftLine : ""}
+                            </div>
+                            <div className={`diff-table-cell ${row.rightCls}`}>
+                              {row.rightLine !== null ? row.rightLine : ""}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+            <div className="file-edit-actions">
+              <button
+                type="button"
+                className="btn primary"
+                disabled={!fileEditState.dirty || fileEditState.lastSaveStatus === "saving"}
+                onClick={onFileEditSave}
+              >
+                Save
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={onSetBaseline}
+              >
+                Set Baseline
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={onResetToBaseline}
+              >
+                Reset
+              </button>
+              <span className="file-edit-status">
+                {fileEditState.lastSaveStatus === "saving" && "Saving…"}
+                {fileEditState.lastSaveStatus === "saved" &&
+                  `Saved ${fileEditState.savedAt ? new Date(fileEditState.savedAt).toLocaleTimeString() : ""} (baseline unchanged)`}
+                {fileEditState.lastSaveStatus === "error" && "Error saving"}
+              </span>
+            </div>
+            {fileEditState.saveError && (
+              <div className="file-edit-error">
+                <strong>Error:</strong> {fileEditState.saveError}
+              </div>
+            )}
+            {fileEditState.verifyInfo && (
+              <div className="file-edit-verify">
+                <strong>Verify:</strong> path={fileEditState.verifyInfo.absolutePath} | size={fileEditState.verifyInfo.fileSizeBytes} bytes | sha256={fileEditState.verifyInfo.contentHashPrefix}…
+              </div>
+            )}
+          </div>
+        )}
+        {showDiffPanel && !fileEditState && patch && (
           <div className="diff-panel">
             <h4>Diff</h4>
             {changedFiles.length > 0 && (
@@ -186,7 +358,7 @@ export function FilesPane({
             )}
           </div>
         )}
-        {(!showDiffPanel || !patch) && (
+        {(!showDiffPanel || (!fileEditState && !patch)) && (
           <div className="file-viewer">
             <h4>{viewerPath ?? "File viewer"}</h4>
             {viewerPath && (

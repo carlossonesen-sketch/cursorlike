@@ -110,6 +110,39 @@ export class WorkspaceService {
     });
   }
 
+  async writeFile(workspaceRoot: string, relPath: string, content: string): Promise<void> {
+    await invoke("write_project_file", {
+      workspaceRoot,
+      relativePath: relPath,
+      content,
+    });
+  }
+
+  /** Resolve relative path under workspace root; returns absolute path. */
+  async resolvePath(workspaceRoot: string, relPath: string): Promise<string> {
+    return invoke<string>("workspace_resolve_path", {
+      workspaceRoot,
+      path: relPath,
+    });
+  }
+
+  /** File size in bytes for a path under workspace root. */
+  async getFileSize(workspaceRoot: string, relPath: string): Promise<number> {
+    return invoke<number>("workspace_file_size", {
+      workspaceRoot,
+      path: relPath,
+    });
+  }
+
+  /** Search files by name under workspace root. Returns relative paths (max 20). */
+  async searchFilesByName(workspaceRoot: string, fileName: string): Promise<string[]> {
+    const result = await invoke<string[]>("workspace_search_files_by_name", {
+      workspaceRoot,
+      fileName: fileName.trim(),
+    });
+    return Array.isArray(result) ? result : [];
+  }
+
   async exists(relPath: string): Promise<boolean> {
     if (this._root == null || this._root === "") {
       console.warn("[WorkspaceService] workspace_exists blocked: no workspace root.");

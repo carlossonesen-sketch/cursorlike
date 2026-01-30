@@ -3,8 +3,150 @@
  * Read-only, project root only; no shell, execution, or edits.
  */
 
-/** Extract a file hint from prompts like "show me the readme", "open README.md", "what's in README". */
+const EDIT_INTENT_WORDS = /\b(change|update|add|remove|fix|refactor|edit|modify)\b/i;
+
+/** True if the prompt suggests editing/changing a file (e.g. "change X", "fix Y"). */
+export function hasEditIntent(prompt: string): boolean {
+  return EDIT_INTENT_WORDS.test(prompt.trim());
+}
+
+const DIFF_REQUEST_WORDS = /\b(propose|proposal|diff|patch|unified\s*diff|create\s*a?\s*diff|generate\s*a?\s*patch)\b/i;
+
+/** True ONLY if user explicitly requests a diff/patch/proposal. */
+export function hasDiffRequest(prompt: string): boolean {
+  return DIFF_REQUEST_WORDS.test(prompt.trim());
+}
+
+/** Edit verbs that indicate file modification intent. */
+const FILE_EDIT_VERBS = /\b(add|insert|remove|delete|change|update|replace|rename|move|prepend|append)\b/i;
+
+/**
+ * Determines if the message should be routed to file editor workflow.
+ * Returns { route: "file", hint: string } if file workflow, or { route: "chat" } otherwise.
+ */
+export function routeMessage(prompt: string): { route: "file"; hint: string } | { route: "chat" } {
+  const mentions = extractFileMentions(prompt);
+  if (mentions.length > 0) {
+    // File mention found - route to file workflow regardless of edit intent
+    return { route: "file", hint: mentions[0] };
+  }
+  // No file mention - route to general chat
+  return { route: "chat" };
+}
+
+/**
+ * Check if message has file edit intent (for UI hints, not routing).
+ */
+export function hasFileEditIntent(prompt: string): boolean {
+  return FILE_EDIT_VERBS.test(prompt.trim());
+}
+
+const FILE_VERBS = new Set<string>([
+  "show", "open", "edit", "change", "fix", "update", "add", "remove", "explain", "summarize", "read", "display",
+]);
+
+const ALLOWED_BARE_FILENAMES = new Set<string>([
+  "readme", "readme.md", "license", "license.md", "package.json", "tsconfig.json", "cargo.toml",
+  "changelog", "changelog.md", "contributing", "contributing.md", "makefile", "dockerfile",
+]);
+
+/** Canonical file names that should be detected even without extension. */
+const BARE_FILE_PATTERN = /\b(readme|license|changelog|contributing|makefile|dockerfile|package\.json|tsconfig\.json|cargo\.toml)\b/i;
+
+const HAS_EXTENSION = /\.([a-z0-9]{1,6})$/i;
+
+function normPath(s: string): string | null {
+  const p = s.replace(/\\/g, "/").trim().replace(/^\/+/, "");
+  if (p.includes("..") || p.length > 250) return null;
+  return p || null;
+}
+
+/** Candidate is valid only if path-like, has extension, or is allowed bare; never a verb. */
+function isValidFileCandidate(raw: string): boolean {
+  const n = normPath(raw);
+  if (!n) return false;
+  const lower = n.toLowerCase();
+  if (FILE_VERBS.has(lower)) return false;
+  if (n.includes("/") || n.includes("\\")) return true;
+  if (HAS_EXTENSION.test(n)) return true;
+  if (ALLOWED_BARE_FILENAMES.has(lower)) return true;
+  return false;
+}
+
+/**
+ * Extract file references from a message. Only returns candidates that:
+ * A) Look like a path (contain / or \), or
+ * B) Have an extension (e.g. .tsx, .md), or
+ * C) Are allowed bare names: README, LICENSE, package.json, tsconfig.json, Cargo.toml.
+ * Verbs (show, open, fix, etc.) are never returned.
+ */
+export function extractFileMentions(prompt: string): string[] {
+  const t = prompt.trim();
+  if (!t) return [];
+  const hints = new Set<string>();
+
+  const add = (raw: string) => {
+    const n = normPath(raw);
+    if (n && isValidFileCandidate(n)) hints.add(n);
+  };
+
+  const lower = t.toLowerCase();
+
+  // PRIORITY 1: Detect bare file names anywhere in the message (readme, license, etc.)
+  const bareMatch = BARE_FILE_PATTERN.exec(lower);
+  if (bareMatch) {
+    add(bareMatch[1]);
+  }
+
+  // PRIORITY 2: "Open: X" explicit syntax
+  if (/open\s*:\s*([^\s]+)/.test(lower)) {
+    const m = t.match(/open\s*:\s*([^\s]+)/i);
+    if (m?.[1]) add(m[1]);
+  }
+
+  // PRIORITY 3: Backtick-quoted paths
+  t.replace(/`([^`]+)`/g, (_, path) => {
+    add(path);
+    return "";
+  });
+
+  // PRIORITY 4: Paths with slashes
+  const pathWithSlash = /[a-zA-Z0-9_.-]+[\/\\][a-zA-Z0-9/\\_.-]+/g;
+  let pm: RegExpExecArray | null;
+  while ((pm = pathWithSlash.exec(t)) !== null) if (pm[0]) add(pm[0]);
+
+  // PRIORITY 5: Tokens with file extensions
+  const withExtension = /\b([a-zA-Z0-9_.-]+\.[a-z0-9]{1,6})\b/gi;
+  while ((pm = withExtension.exec(t)) !== null) if (pm[1]) add(pm[1]);
+
+  // PRIORITY 6: Phrase patterns like "open X", "show me X", "in X add Y"
+  const phraseRe = /(?:show\s+me|open|read|display|what'?s?\s+in)\s+(?:the\s+)?([^\s?,]+)|in\s+([^\s]+)\s+(?:add|remove|change|fix|update)/gi;
+  let phraseMatch: RegExpExecArray | null;
+  while ((phraseMatch = phraseRe.exec(t)) !== null) {
+    const captured = phraseMatch[1] ?? phraseMatch[2];
+    if (captured) add(captured.trim());
+  }
+
+  // PRIORITY 7: "X and add/remove/change Y" pattern - file followed by edit verb
+  const fileAndEditRe = /\b([a-zA-Z0-9_.-]+)\s+and\s+(?:add|insert|remove|delete|change|update|replace|prepend|append)\b/gi;
+  while ((phraseMatch = fileAndEditRe.exec(t)) !== null) {
+    const captured = phraseMatch[1];
+    if (captured) add(captured.trim());
+  }
+
+  // Fallback: entire prompt is a single path-like token
+  if (hints.size === 0 && /^[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*\s*$/.test(t)) add(t.trim());
+  if (hints.size === 0 && ALLOWED_BARE_FILENAMES.has(lower)) add(t.trim());
+
+  const result = [...hints];
+  if (result.length > 0) console.log("fileMentionsDetected:", result);
+  return result;
+}
+
+/** Extract a single file hint (first from extractFileMentions, or getRequestedFileHint). */
 export function getRequestedFileHint(prompt: string): string | null {
+  const mentions = extractFileMentions(prompt);
+  if (mentions.length > 0) return mentions[0];
   const t = prompt.trim();
   if (!t) return null;
   const lower = t.toLowerCase();
@@ -25,19 +167,31 @@ function normalizePath(hint: string): string | null {
   return p || null;
 }
 
+function isExactMatch(relPath: string, hint: string): boolean {
+  const name = (relPath.split(/[/\\]/).pop() ?? "").toLowerCase();
+  const stem = (name.replace(/\.[^.]+$/, "") || name).toLowerCase();
+  const hintLower = hint.toLowerCase().trim();
+  const hintStem = (hintLower.replace(/\.[^.]+$/, "") || hintLower).toLowerCase();
+  return name === hintLower || stem === hintStem || name === hintStem;
+}
+
+export type ReadProjectFileResult =
+  | { path: string; content: string }
+  | { path: string; error: string }
+  | { path: string; error: "multiple"; candidates: string[] };
+
 /**
  * Resolve hint to a path under project root and read the file.
- * - hint: e.g. "readme", "README.md", "src/main.ts"
- * - readFile: (relPath: string) => Promise<string>
- * - exists: (relPath: string) => Promise<boolean>
- * Returns { path, content } or { path, error } for display. Path is relative to workspace root.
+ * If direct open fails or hint is fuzzy (e.g. "readme"), uses searchFiles when provided.
+ * Returns { path, content }, { path, error }, or { path, error: "multiple", candidates }.
  */
 export async function readProjectFile(
-  _workspaceRoot: string,
+  workspaceRoot: string,
   hint: string,
   readFile: (relPath: string) => Promise<string>,
-  exists: (relPath: string) => Promise<boolean>
-): Promise<{ path: string; content: string } | { path: string; error: string }> {
+  exists: (relPath: string) => Promise<boolean>,
+  searchFiles?: (workspaceRoot: string, fileName: string) => Promise<string[]>
+): Promise<ReadProjectFileResult> {
   const normalized = normalizePath(hint);
   if (!normalized) return { path: hint, error: "not found" };
 
@@ -63,6 +217,27 @@ export async function readProjectFile(
       }
     } catch {
       /* try next */
+    }
+  }
+
+  if (searchFiles) {
+    try {
+      const list = await searchFiles(workspaceRoot, hint);
+      if (list.length === 0) {
+        return { path: normalized.includes("/") ? normalized : hint, error: "not found" };
+      }
+      if (list.length === 1) {
+        const content = await readFile(list[0]);
+        return { path: list[0], content };
+      }
+      const exactMatches = list.filter((p) => isExactMatch(p, hint));
+      if (exactMatches.length === 1) {
+        const content = await readFile(exactMatches[0]);
+        return { path: exactMatches[0], content };
+      }
+      return { path: hint, error: "multiple", candidates: list };
+    } catch {
+      /* fall through to not found */
     }
   }
 

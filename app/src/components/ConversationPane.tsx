@@ -176,7 +176,7 @@ export function ConversationPane({
         {messages.length === 0 && !planAndPatch && !resume && (
           <p className="muted placeholder">
             {workspaceRoot
-              ? "Add context files on the right, then describe your change and propose a patch."
+              ? "Describe what you want or mention a file (e.g. README, src/App.tsx)."
               : "Open a workspace first."}
           </p>
         )}
@@ -271,18 +271,6 @@ export function ConversationPane({
       )}
       <div className="conversation-input">
         <div className="model-settings">
-          <label className="provider-select-label">
-            Provider
-            <select
-              className="provider-select"
-              value={provider}
-              onChange={(e) => onProviderChange(e.target.value as Provider)}
-              aria-label="Model provider"
-            >
-              <option value="mock">Mock</option>
-              <option value="local">Local (llama.cpp)</option>
-            </select>
-          </label>
           {provider === "local" && (
             <>
               {!toolRoot && workspaceRoot && (
@@ -316,7 +304,7 @@ export function ConversationPane({
                 </div>
               )}
               <div className="project-snapshot-row">
-                <span className="project-snapshot-label">Provider:</span>
+                <span className="project-snapshot-label">Provider (internal):</span>
                 <span className="project-snapshot-value">{provider}</span>
               </div>
               {provider === "local" && (
@@ -424,16 +412,6 @@ export function ConversationPane({
           Use Knowledge Packs
         </label>
         <div className="input-row">
-          <select
-            className="agent-select"
-            value={agentMode}
-            onChange={(e) => onAgentModeChange(e.target.value as AgentMode)}
-            aria-label="Agent mode"
-          >
-            <option value="Coder">Coder</option>
-            <option value="Planner">Planner</option>
-            <option value="Reviewer">Reviewer</option>
-          </select>
           <textarea
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
@@ -443,44 +421,19 @@ export function ConversationPane({
                 handleSendChat();
               }
             }}
-            placeholder="Describe your change…"
+            placeholder="Describe what you want or mention a file…"
             rows={2}
             disabled={!workspaceRoot}
           />
         </div>
         <button
           type="button"
-          className="btn secondary"
+          className="btn primary"
           disabled={!workspaceRoot || (provider === "local" && (!toolRoot || !localSettings.ggufPath?.trim()))}
           onClick={handleSendChat}
         >
           Send
         </button>
-        <button
-          type="button"
-          className="btn primary"
-          disabled={
-            !workspaceRoot ||
-            agentMode !== "Coder" ||
-            (provider === "local" && (!toolRoot || !localSettings.ggufPath?.trim()))
-          }
-          onClick={handlePropose}
-        >
-          Propose Patch
-        </button>
-        {agentMode !== "Coder" && (
-          <button
-            type="button"
-            className="btn primary"
-            disabled={
-              !workspaceRoot ||
-              (provider === "local" && (!toolRoot || !localSettings.ggufPath?.trim()))
-            }
-            onClick={handlePipeline}
-          >
-            Run Pipeline
-          </button>
-        )}
       </div>
     </div>
   );

@@ -81,6 +81,17 @@ pub fn workspace_write_file(
     std::fs::write(&full, content.as_bytes()).map_err(|e| e.to_string())
 }
 
+/// Write a file under workspace root. Same as workspace_write_file; alias for file-editor use.
+/// Security: resolve() rejects ".." and ensures path stays under workspace_root.
+#[tauri::command]
+pub fn write_project_file(
+    workspace_root: String,
+    relative_path: String,
+    content: String,
+) -> Result<(), String> {
+    workspace_write_file(workspace_root, relative_path, content)
+}
+
 #[tauri::command]
 pub fn workspace_exists(workspace_root: String, path: String) -> Result<bool, String> {
     let full = resolve(&workspace_root, &path)?;
@@ -137,4 +148,126 @@ pub fn workspace_append_file(
     f.write_all(b"\n").map_err(|e| e.to_string())?;
     f.flush().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Directories that must NEVER appear in search results (no descend, no files from under them).
+const SEARCH_IGNORED: &[&str] = &[
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".git",
+    ".devassistant",
+    "runtime",
+    "models",
+    "source", // excludes source/, source/DevAssistant, source/DevAssistant/_internal
+];
+/// Path prefixes to filter from results (defense in depth; use forward slash).
+const SEARCH_IGNORED_PREFIXES: &[&str] = &["source/", "runtime/", "models/"];
+const SEARCH_MAX_DEPTH: u32 = 8;
+const SEARCH_MAX_RESULTS: usize = 20;
+
+/// Search files by name under workspace root. Returns relative paths (max 20), sorted:
+/// exact filename > exact stem > partial, then fewer segments (root-near), then shorter path, then alphabetical.
+#[tauri::command]
+pub fn workspace_search_files_by_name(
+    workspace_root: String,
+    file_name: String,
+) -> Result<Vec<String>, String> {
+    let root = Path::new(&workspace_root);
+    if !root.is_absolute() {
+        return Err("workspace_root must be absolute".into());
+    }
+    let root_canon = root.canonicalize().map_err(|e| e.to_string())?;
+    let search_lower = file_name.trim().to_lowercase();
+    if search_lower.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut matches: Vec<String> = Vec::new();
+    walk_for_name(
+        &root_canon,
+        PathBuf::new(),
+        0,
+        &search_lower,
+        &mut matches,
+    )?;
+    matches.retain(|p| {
+        let n = p.replace('\\', "/");
+        !SEARCH_IGNORED_PREFIXES.iter().any(|pref| n.starts_with(*pref))
+    });
+    sort_search_results(&mut matches, &search_lower);
+    if matches.len() > SEARCH_MAX_RESULTS {
+        matches.truncate(SEARCH_MAX_RESULTS);
+    }
+    Ok(matches)
+}
+
+fn walk_for_name(
+    root: &Path,
+    rel: PathBuf,
+    depth: u32,
+    search_lower: &str,
+    out: &mut Vec<String>,
+) -> Result<(), String> {
+    if depth > SEARCH_MAX_DEPTH || out.len() >= SEARCH_MAX_RESULTS {
+        return Ok(());
+    }
+    let full = root.join(&rel);
+    let entries = match std::fs::read_dir(&full) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+    for e in entries {
+        if out.len() >= SEARCH_MAX_RESULTS {
+            break;
+        }
+        let e = e.map_err(|e| e.to_string())?;
+        let name = e.file_name().to_string_lossy().into_owned();
+        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if is_dir {
+            if SEARCH_IGNORED.iter().any(|&d| d.eq_ignore_ascii_case(&name)) {
+                continue;
+            }
+            let next_rel = rel.join(&name);
+            walk_for_name(root, next_rel, depth + 1, search_lower, out)?;
+        } else {
+            let name_lower = name.to_lowercase();
+            let stem = Path::new(&name)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let exact = name_lower == *search_lower || stem == *search_lower;
+            let fuzzy = name_lower.contains(search_lower) || stem.contains(search_lower);
+            if exact || fuzzy {
+                let rel_str = rel.join(&name).to_string_lossy().replace('\\', "/");
+                out.push(rel_str);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn sort_search_results(matches: &mut [String], search_lower: &str) {
+    fn rank(path: &str, search_lower: &str) -> (u8, usize, usize) {
+        let name = Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
+        let stem = Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+        let tier = if name == search_lower {
+            0u8 // exact filename
+        } else if stem == search_lower {
+            1 // exact stem
+        } else {
+            2 // partial
+        };
+        let segments = path.matches(|c| c == '/' || c == '\\').count() + 1;
+        (tier, segments, path.len())
+    }
+    matches.sort_by(|a, b| {
+        let (a_tier, a_seg, a_len) = rank(a, search_lower);
+        let (b_tier, b_seg, b_len) = rank(b, search_lower);
+        a_tier.cmp(&b_tier)
+            .then(a_seg.cmp(&b_seg))
+            .then(a_len.cmp(&b_len))
+            .then(a.cmp(b))
+    });
 }
