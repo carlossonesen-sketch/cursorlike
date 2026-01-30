@@ -63,3 +63,7 @@ source/DevAssistant/**
 *.exe
 *.dll
 *.pyd
+
+# local tools
+tools/
+
