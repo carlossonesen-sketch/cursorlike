@@ -54,3 +54,12 @@ runtime/llama/*
 **/knowledge_index.json
 .cache/
 *.tsbuildinfo
+
+# ---- ignore packaged/binary bundles ----
+source/DevAssistant/
+source/DevAssistant/**
+
+# Windows binaries (extra safety)
+*.exe
+*.dll
+*.pyd
