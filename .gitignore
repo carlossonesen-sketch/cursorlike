@@ -1,0 +1,56 @@
+# Dependencies and build outputs
+node_modules/
+dist/
+dist-ssr/
+build/
+*.local
+
+# Rust / Tauri
+**/target/
+**/.tauri/
+**/gen/schemas
+
+# Logs and debug
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# OS and editors
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Env and secrets (keep .env.example / ENV.example)
+.env
+.env.*
+!.env.example
+!ENV.example
+**/secrets/
+**/*credentials*.json
+**/*service*account*.json
+**/*-key*.json
+
+# Model files and large binaries
+*.gguf
+
+# Local LLM runtime (keep README only)
+runtime/llama/*
+!runtime/llama/README.md
+
+# Workspace-local store and caches
+.devassistant/
+**/.devassistant/
+**/knowledge_index.json
+.cache/
+*.tsbuildinfo
