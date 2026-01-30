@@ -88,3 +88,43 @@ pub fn scan_models_for_gguf(tool_root: String) -> Result<Option<String>, String>
     });
     Ok(Some(ggufs[0].0.clone()))
 }
+
+#[derive(serde::Serialize)]
+pub struct ScanModelsByMtimeResult {
+    pub path: String,
+    pub had_multiple: bool,
+}
+
+/// Scan tool_root/models for *.gguf. Pick by most recently modified.
+/// If multiple, pick newest and set had_multiple.
+#[tauri::command]
+pub fn scan_models_for_gguf_by_mtime(tool_root: String) -> Result<Option<ScanModelsByMtimeResult>, String> {
+    let models_dir = Path::new(&tool_root).join(MODELS_DIR);
+    if !models_dir.is_dir() {
+        return Ok(None);
+    }
+    let mut ggufs: Vec<(String, std::time::SystemTime)> = Vec::new();
+    for e in std::fs::read_dir(&models_dir).map_err(|e| e.to_string())? {
+        let e = e.map_err(|e| e.to_string())?;
+        let name = e.file_name().to_string_lossy().into_owned();
+        if e.file_type().map(|t| t.is_dir()).unwrap_or(true) {
+            continue;
+        }
+        if !name.to_lowercase().ends_with(GGUF_EXT) {
+            continue;
+        }
+        let rel = format!("{}/{}", MODELS_DIR, name);
+        let full = models_dir.join(&name);
+        let mtime = std::fs::metadata(&full).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+        ggufs.push((rel, mtime));
+    }
+    if ggufs.is_empty() {
+        return Ok(None);
+    }
+    let had_multiple = ggufs.len() > 1;
+    ggufs.sort_by(|a, b| b.1.cmp(&a.1));
+    Ok(Some(ScanModelsByMtimeResult {
+        path: ggufs[0].0.clone(),
+        had_multiple,
+    }))
+}

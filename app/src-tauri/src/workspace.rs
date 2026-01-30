@@ -1,5 +1,7 @@
 //! Workspace-scoped filesystem operations. All paths validated against root; no writes outside.
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 fn normalize_rel(s: &str) -> PathBuf {
@@ -96,4 +98,43 @@ pub fn workspace_file_size(workspace_root: String, path: String) -> Result<u64, 
 pub fn workspace_mkdir_all(workspace_root: String, path: String) -> Result<(), String> {
     let full = resolve(&workspace_root, &path)?;
     std::fs::create_dir_all(&full).map_err(|e| e.to_string())
+}
+
+/// Resolve relative path under workspace root; return absolute path as string.
+#[tauri::command]
+pub fn workspace_resolve_path(workspace_root: String, path: String) -> Result<String, String> {
+    let full = resolve(&workspace_root, &path)?;
+    Ok(full.to_string_lossy().replace('\\', "/"))
+}
+
+/// Create .devassistant/logs and return absolute path for llama-server.log.
+#[tauri::command]
+pub fn workspace_ensure_log_dir(workspace_root: String) -> Result<String, String> {
+    let logs_dir = resolve(&workspace_root, ".devassistant/logs")?;
+    std::fs::create_dir_all(&logs_dir).map_err(|e| e.to_string())?;
+    let log_file = logs_dir.join("llama-server.log");
+    Ok(log_file.to_string_lossy().replace('\\', "/"))
+}
+
+/// Append content to a file under workspace root. Creates parent dirs and file if missing.
+#[tauri::command]
+pub fn workspace_append_file(
+    workspace_root: String,
+    path: String,
+    content: String,
+) -> Result<(), String> {
+    let full = resolve(&workspace_root, &path)?;
+    if let Some(p) = full.parent() {
+        std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
+    }
+    let mut f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .write(true)
+        .open(&full)
+        .map_err(|e| format!("append_file {}: {}", full.display(), e))?;
+    f.write_all(content.as_bytes()).map_err(|e| e.to_string())?;
+    f.write_all(b"\n").map_err(|e| e.to_string())?;
+    f.flush().map_err(|e| e.to_string())?;
+    Ok(())
 }

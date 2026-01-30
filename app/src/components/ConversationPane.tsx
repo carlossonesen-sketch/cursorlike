@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { ProposalCard } from "./ProposalCard";
+import { RuntimeStatusPanel } from "./RuntimeStatusPanel";
 import type {
   PlanAndPatch,
   PlannerOutput,
@@ -159,6 +160,11 @@ export function ConversationPane({
 
   return (
     <div className="conversation-pane">
+      {provider === "local" && (
+        <div className="runtime-status-wrap">
+          <RuntimeStatusPanel workspaceRoot={workspaceRoot} />
+        </div>
+      )}
       <div className="conversation-stream" ref={scrollRef}>
         {resume && messages.length === 0 && !planAndPatch && (
           <div className="resume-block message assistant">

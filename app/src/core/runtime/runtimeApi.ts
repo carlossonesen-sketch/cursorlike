@@ -47,6 +47,24 @@ export interface GenerateOptions {
   max_tokens?: number;
 }
 
+export interface ChatOptions {
+  max_tokens?: number;
+  temperature?: number;
+}
+
+/** Try /v1/chat/completions first; on failure try /completion. Returns assistant content or throws. */
+export async function runtimeChat(
+  systemPrompt: string,
+  userPrompt: string,
+  options?: ChatOptions
+): Promise<string> {
+  return invoke<string>("runtime_chat", {
+    systemPrompt,
+    userPrompt,
+    options: options ?? undefined,
+  });
+}
+
 /** Walk up from workspace_root (up to 8 levels). First dir with runtime/llama + models/ is toolRoot. */
 export async function findToolRoot(workspaceRoot: string): Promise<string | null> {
   const result = await invoke<unknown>("find_tool_root", { workspaceRoot });
@@ -64,6 +82,11 @@ export async function toolRootExists(toolRoot: string, relPath: string): Promise
   return invoke<boolean>("tool_root_exists", { toolRoot, relPath });
 }
 
+/** GET http://127.0.0.1:port/health; true if 200. */
+export async function runtimeHealthCheck(port: number): Promise<boolean> {
+  return invoke<boolean>("runtime_health_check", { port });
+}
+
 export function resolveModelPath(toolRoot: string, relPath: string): string {
   const root = toolRoot.replace(/\\/g, "/").replace(/\/+$/, "");
   const rel = relPath.replace(/\\/g, "/").replace(/^\/+/, "");
@@ -74,13 +97,15 @@ export async function runtimeStart(
   ggufPath: string,
   toolRoot: string | null,
   params: RuntimeStartParams | null,
-  portOverride?: number | null
+  portOverride?: number | null,
+  logFilePath?: string | null
 ): Promise<RuntimeStartResult> {
   return invoke<RuntimeStartResult>("runtime_start", {
     ggufPath,
     toolRoot: toolRoot || undefined,
     params: params || undefined,
     portOverride: portOverride ?? undefined,
+    logFilePath: logFilePath || undefined,
   });
 }
 
@@ -126,6 +151,6 @@ export async function ensureLocalRuntime(
     top_p: settings.top_p,
     max_tokens: settings.max_tokens,
     context_length: settings.context_length,
-  }, usePort);
+  }, usePort, null);
   return result.port;
 }

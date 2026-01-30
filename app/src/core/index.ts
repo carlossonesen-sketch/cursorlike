@@ -1,5 +1,6 @@
 export * from "./types";
 export { WorkspaceService } from "./workspace/WorkspaceService";
+export { getRequestedFileHint, readProjectFile } from "./workspace/readProjectFile";
 export { ProjectInspector } from "./inspect/ProjectInspector";
 export { ProjectDetector } from "./project/ProjectDetector";
 export type { ProjectDetectorResult } from "./project/ProjectDetector";

@@ -8,6 +8,7 @@ import type { IModelProvider } from "./ModelGateway";
 import {
   ensureLocalRuntime,
   runtimeGenerate,
+  runtimeChat,
   type LocalModelSettings,
   type GenerateOptions,
 } from "../runtime/runtimeApi";
@@ -57,10 +58,11 @@ function buildCoderPrompt(ctx: ModelContext): string {
   return parts.join("\n");
 }
 
-function buildChatPrompt(ctx: ModelContext): string {
+const CHAT_SYSTEM_PROMPT =
+  "You are a helpful dev assistant. Answer the user's question concisely. Do NOT output a diff, unified patch, or code changes. Just answer normally in plain text.";
+
+function buildChatUserPrompt(ctx: ModelContext): string {
   const parts: string[] = [];
-  parts.push("You are a helpful dev assistant. Answer the user's question concisely. Do NOT output a diff, unified patch, or code changes. Just answer normally in plain text.");
-  parts.push("");
   parts.push("User: " + ctx.prompt);
   if (ctx.selectedFiles.length) {
     parts.push("");
@@ -118,13 +120,23 @@ export class LocalModelProvider implements IModelProvider {
   async generateChatResponse(ctx: ModelContext): Promise<string> {
     const settings = this.getSettings();
     await ensureLocalRuntime(settings, this.getToolRoot(), this.getPort());
-    const prompt = buildChatPrompt(ctx);
+    const userPrompt = buildChatUserPrompt(ctx);
     const opts = this.getGenerateOptions();
-    const raw = await runtimeGenerate(prompt, false, {
-      temperature: opts.temperature ?? settings.temperature,
-      top_p: opts.top_p ?? settings.top_p,
-      max_tokens: opts.max_tokens ?? settings.max_tokens,
-    });
-    return (raw || "").trim() || "No response.";
+    const maxTokens = Math.min(512, opts.max_tokens ?? settings.max_tokens);
+    const temperature = Math.max(0.2, Math.min(0.7, opts.temperature ?? settings.temperature));
+    try {
+      const raw = await runtimeChat(CHAT_SYSTEM_PROMPT, userPrompt, {
+        max_tokens: maxTokens,
+        temperature,
+      });
+      return (raw || "").trim() || "No response.";
+    } catch (e) {
+      const msg = String(e);
+      const lines = msg.split("\n");
+      const first = lines[0]?.trim() || msg;
+      const rest = lines.slice(1).filter(Boolean).join("\n");
+      const second = rest ? rest : "Endpoint: n/a";
+      return `LOCAL_MODEL_ERROR: ${first}\n${second}`;
+    }
   }
 }

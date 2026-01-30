@@ -29,6 +29,8 @@ import {
   MemoryStore,
   resumeSuggestion,
   DEFAULT_LOCAL_SETTINGS,
+  getRequestedFileHint,
+  readProjectFile,
 } from "./core";
 import type {
   FileTreeNode,
@@ -288,6 +290,75 @@ export default function App() {
       }
       const p = (prompt || "").trim() || "(no prompt)";
       setMessages((prev) => [...prev, { id: `u-${Date.now()}`, role: "user", text: p }]);
+
+      if (p.startsWith("/")) {
+        const cmd = p.slice(1).trim().toLowerCase().split(/\s+/)[0] || "";
+        let reply: string;
+        if (cmd === "help") {
+          reply = "Commands: /help — this message; /snapshot — project snapshot.";
+        } else if (cmd === "snapshot") {
+          reply = projectSnapshot
+            ? `Types: ${projectSnapshot.detectedTypes.join(", ")}. Packs: ${projectSnapshot.enabledPacks.join(", ")}.`
+            : "No snapshot. Open workspace and refresh.";
+        } else {
+          reply = "Unknown command. Try /help";
+        }
+        setMessages((prev) => [
+          ...prev,
+          { id: `a-${Date.now()}`, role: "assistant", text: reply },
+        ]);
+        return;
+      }
+
+      const fileHint = getRequestedFileHint(p);
+      if (fileHint) {
+        const result = await readProjectFile(root, fileHint, (path) => workspace.readFile(path), (path) => workspace.exists(path));
+        if ("error" in result) {
+          setMessages((prev) => [
+            ...prev,
+            { id: `a-${Date.now()}`, role: "assistant", text: `${result.path} not found.` },
+          ]);
+          return;
+        }
+        const injectedPrompt = `--- FILE: ${result.path} ---\n${result.content}\n--- END FILE ---\n\nUser request: ${p}`;
+        setStatusLine("Generating reply…");
+        try {
+          const inspector = new ProjectInspector(workspace);
+          const m = manifest ?? (await inspector.buildManifest());
+          if (!manifest) setManifest(m);
+          const ctxBuilder = new ContextBuilder(workspace, m);
+          const knowledgeStore = useKnowledgePacks ? new KnowledgeStore(root, workspace) : null;
+          const ctx = await ctxBuilder.build(injectedPrompt, selectedPaths, {
+            useKnowledge: useKnowledgePacks,
+            knowledgeStore: knowledgeStore ?? undefined,
+            agentRole: "coder",
+            projectSnapshot: projectSnapshot ?? undefined,
+            enabledPacks: enabledPacks.length ? enabledPacks : undefined,
+          });
+          setLastRetrievedChunks(
+            ctx.knowledgeChunks?.map((c) => ({
+              title: c.title,
+              sourcePath: c.sourcePath,
+              chunkText: c.chunkText,
+            })) ?? []
+          );
+          const text = await generateChatResponse(ctx);
+          setMessages((prev) => [
+            ...prev,
+            { id: `a-${Date.now()}`, role: "assistant", text },
+          ]);
+        } catch (e) {
+          console.error("sendChatMessage", e);
+          setMessages((prev) => [
+            ...prev,
+            { id: `a-${Date.now()}`, role: "assistant", text: `Error: ${String(e)}` },
+          ]);
+        } finally {
+          setStatusLine(null);
+        }
+        return;
+      }
+
       setStatusLine("Generating reply…");
       try {
         const inspector = new ProjectInspector(workspace);

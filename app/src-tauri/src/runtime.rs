@@ -2,7 +2,7 @@
 
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -79,12 +79,23 @@ fn resolve_llama_from_tool_root(tool_root: &str) -> Result<PathBuf, String> {
     ))
 }
 
+/// Health check: GET http://127.0.0.1:port/health, return true if 200.
+#[tauri::command]
+pub async fn runtime_health_check(port: u16) -> Result<bool, String> {
+    let url = format!("http://127.0.0.1:{}/health", port);
+    match reqwest::get(&url).await {
+        Ok(resp) => Ok(resp.status().as_u16() == 200),
+        Err(_) => Ok(false),
+    }
+}
+
 #[tauri::command]
 pub async fn runtime_start(
     gguf_path: String,
     tool_root: Option<String>,
     params: Option<RuntimeStartParams>,
     port_override: Option<u16>,
+    log_file_path: Option<String>,
     state: tauri::State<'_, Mutex<RuntimeState>>,
 ) -> Result<RuntimeStartResult, String> {
     let gguf_path = gguf_path.trim();
@@ -146,10 +157,24 @@ pub async fn runtime_start(
         args.push(p.context_length.to_string());
     }
 
+    let (stdout, stderr) = if let Some(ref log_path) = log_file_path {
+        let p = PathBuf::from(log_path);
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).append(true).write(true);
+        let f1 = opts.open(&p).map_err(|e| format!("Failed to open log file: {}", e))?;
+        let f2 = opts.open(&p).map_err(|e| format!("Failed to open log file: {}", e))?;
+        (Stdio::from(f1), Stdio::from(f2))
+    } else {
+        (Stdio::null(), Stdio::null())
+    };
+
     let child = Command::new(&server_path)
         .args(&args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr)
         .spawn()
         .map_err(|e| format!("Failed to start llama-server: {}", e))?;
 
@@ -162,7 +187,7 @@ pub async fn runtime_start(
         s.child = Some(child);
     }
 
-    for _ in 0..30 {
+    for _ in 0..40 {
         tokio::time::sleep(Duration::from_millis(500)).await;
         let url = format!("http://127.0.0.1:{}/health", port);
         if let Ok(resp) = reqwest::get(&url).await {
@@ -177,7 +202,7 @@ pub async fn runtime_start(
         let _ = child.kill();
     }
     s.port = None;
-    Err("llama-server did not become ready within 15 seconds.".to_string())
+    Err("llama-server did not become ready within 20 seconds.".to_string())
 }
 
 #[tauri::command]
@@ -227,6 +252,129 @@ struct CompletionRequest {
 #[derive(serde::Deserialize)]
 struct CompletionResponse {
     content: Option<String>,
+}
+
+/// OpenAI-style chat message.
+#[derive(serde::Serialize)]
+struct ChatMessage {
+    role: String,
+    content: String,
+}
+
+/// Request for /v1/chat/completions.
+#[derive(serde::Serialize)]
+struct ChatCompletionsRequest {
+    model: String,
+    messages: Vec<ChatMessage>,
+    max_tokens: i32,
+    temperature: f64,
+    stream: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct ChatChoice {
+    message: Option<ChatMessageResponse>,
+}
+
+#[derive(serde::Deserialize)]
+struct ChatMessageResponse {
+    content: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ChatCompletionsResponse {
+    choices: Option<Vec<ChatChoice>>,
+}
+
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ChatOptions {
+    #[serde(default)]
+    pub max_tokens: i32,
+    #[serde(default)]
+    pub temperature: f64,
+}
+
+/// Try /v1/chat/completions first; on failure try /completion. Returns assistant content or error.
+#[tauri::command]
+pub async fn runtime_chat(
+    system_prompt: String,
+    user_prompt: String,
+    options: Option<ChatOptions>,
+    state: tauri::State<'_, Mutex<RuntimeState>>,
+) -> Result<String, String> {
+    let port = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        s.port.ok_or_else(|| {
+            "Runtime not started. Start the runtime with a GGUF model first.\nEndpoint: n/a (runtime not started)".to_string()
+        })?
+    };
+
+    let opt = options.unwrap_or_default();
+    let max_tokens = if opt.max_tokens > 0 { opt.max_tokens } else { 512 };
+    let temperature = if opt.temperature >= 0.0 && opt.temperature <= 2.0 {
+        opt.temperature
+    } else {
+        0.5
+    };
+
+    let combined = format!("{}\n\n{}", system_prompt.trim(), user_prompt.trim());
+
+    let url_completions = format!("http://127.0.0.1:{}/v1/chat/completions", port);
+    let body_completions = ChatCompletionsRequest {
+        model: "llama".to_string(),
+        messages: vec![
+            ChatMessage { role: "system".to_string(), content: system_prompt },
+            ChatMessage { role: "user".to_string(), content: user_prompt },
+        ],
+        max_tokens,
+        temperature,
+        stream: false,
+    };
+
+    let client = reqwest::Client::new();
+    if let Ok(resp) = client.post(&url_completions).json(&body_completions).send().await {
+        if resp.status().is_success() {
+            if let Ok(json) = resp.json::<ChatCompletionsResponse>().await {
+                if let Some(choices) = json.choices {
+                    if let Some(first) = choices.into_iter().next() {
+                        if let Some(msg) = first.message {
+                            if let Some(c) = msg.content {
+                                return Ok(c.trim().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let url_completion = format!("http://127.0.0.1:{}/completion", port);
+    let body_completion = CompletionRequest {
+        prompt: combined,
+        n_predict: max_tokens,
+        temperature,
+        top_p: 0.9,
+        stream: false,
+    };
+
+    let resp = client
+        .post(&url_completion)
+        .json(&body_completion)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {}\nEndpoint: {} (no response)", e, url_completion))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "llama-server error {}: {}\nEndpoint: {} HTTP {}",
+            status, text, url_completion, status
+        ));
+    }
+
+    let json: CompletionResponse = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
+    Ok(json.content.unwrap_or_default().trim().to_string())
 }
 
 #[tauri::command]

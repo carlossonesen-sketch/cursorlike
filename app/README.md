@@ -22,6 +22,13 @@ npm run tauri build
 
 Output: `src-tauri/target/release/` (exe) and installer artifacts.
 
+## Add a GGUF model
+
+1. Put your `.gguf` file in `./models` (e.g. `models/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf`).
+2. Restart the app (or use **Runtime Status** → **Start**). The app auto-detects the model and uses it for the Local (llama.cpp) provider.
+
+If multiple `.gguf` files exist, the app picks the **most recently modified** one and logs a warning.
+
 ## Launcher
 
 From repo root, `launcher/Start-Assistant.cmd` (or `.ps1`) launches the built Tauri binary, prepends `tools/` to PATH, and logs to `Start-Assistant.log`. Build the app first.

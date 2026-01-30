@@ -264,6 +264,167 @@
   gap: 6px;
 }
 
+/* In normal flow above chat; no overlay */
+.runtime-status-wrap {
+  flex-shrink: 0;
+  border-bottom: 1px solid #ddd;
+}
+
+.runtime-status-panel {
+  padding: 6px 8px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow: hidden;
+}
+
+.runtime-status-panel.runtime-status-size-small {
+  max-height: 80px;
+}
+
+.runtime-status-panel.runtime-status-size-medium {
+  max-height: 140px;
+}
+
+.runtime-status-panel.runtime-status-size-large {
+  max-height: 220px;
+}
+
+.runtime-status-body {
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.runtime-status-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.runtime-status-title {
+  color: #333;
+}
+
+.runtime-status-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.runtime-status-minimize,
+.runtime-status-details-toggle {
+  font-size: 11px;
+  padding: 2px 6px;
+}
+
+.runtime-status-size-buttons {
+  display: flex;
+  gap: 2px;
+}
+
+.runtime-status-size-buttons .btn {
+  min-width: 24px;
+  padding: 2px 6px;
+  font-size: 11px;
+}
+
+.runtime-status-size-buttons .btn.active {
+  font-weight: 600;
+  border-color: #666;
+}
+
+.runtime-status-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.runtime-status-row {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+  align-items: baseline;
+}
+
+.runtime-status-rows .runtime-status-label {
+  min-width: 72px;
+}
+
+.runtime-status-label {
+  color: #666;
+  min-width: 80px;
+}
+
+.runtime-status-value {
+  color: #333;
+}
+
+.runtime-status-error .runtime-status-value {
+  color: #c00;
+}
+
+.runtime-status-extra {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.runtime-status-paths {
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.runtime-status-path {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+}
+
+.runtime-status-path-value {
+  font-size: 11px;
+  word-break: break-all;
+  user-select: all;
+  cursor: text;
+  padding: 2px 4px;
+  background: #f5f5f5;
+  border-radius: 3px;
+  border: 1px solid #ddd;
+}
+
+.runtime-status-create-log-result {
+  margin-top: 2px;
+  font-size: 11px;
+}
+
+.runtime-status-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+  flex-shrink: 0;
+}
+
+.runtime-status-details {
+  margin-top: 4px;
+  flex-shrink: 0;
+}
+
+.runtime-status-details-toggle {
+  font-size: 11px;
+}
+
 .local-settings .local-advanced {
   display: flex;
   flex-direction: column;
@@ -1089,6 +1250,14 @@
   .local-settings .advanced-toggle { color: #999; }
   .local-settings .advanced-toggle:hover { color: #e0e0e0; }
   .project-snapshot-block { border-color: #444; }
+  .runtime-status-wrap { border-color: #444; }
+  .runtime-status-panel { border-color: #444; }
+  .runtime-status-title { color: #e0e0e0; }
+  .runtime-status-label { color: #999; }
+  .runtime-status-value { color: #e0e0e0; }
+  .runtime-status-error .runtime-status-value { color: #f66; }
+  .runtime-status-path-value { background: #2a2a2a; border-color: #444; color: #e0e0e0; }
+  .runtime-status-size-buttons .btn.active { border-color: #888; color: #e0e0e0; }
   .project-snapshot-label { color: #999; }
   .project-snapshot-value { color: #e0e0e0; }
   .project-snapshot-packs .pack-toggle { color: #999; }
