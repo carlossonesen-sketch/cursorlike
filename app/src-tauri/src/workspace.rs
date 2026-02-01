@@ -1,6 +1,6 @@
 //! Workspace-scoped filesystem operations. All paths validated against root; no writes outside.
 
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
