@@ -33,8 +33,9 @@ import {
   readProjectFile,
   extractFileMentions,
   hasDiffRequest,
-  routeMessage,
+  routeUserMessage,
   hasFileEditIntent,
+  applySimpleEdit,
   detectProjectRoot,
   getDefaultEnabledPackIds,
   generateSnapshotData,
@@ -424,12 +425,12 @@ export default function App() {
         return;
       }
 
-      // ROUTING: Check for file workflow FIRST, before any chat logic
-      const routing = routeMessage(p);
-      console.log("MESSAGE_ROUTING:", routing);
-      
-      if (routing.route === "file") {
-        const fileHint = routing.hint;
+      // ROUTING: File actions FIRST, before any chat logic
+      const route = routeUserMessage(p);
+      console.log("MESSAGE_ROUTING:", route);
+
+      if (route.action === "file_open" || route.action === "file_edit") {
+        const fileHint = route.targetPath;
         const result = await readProjectFile(
           root,
           fileHint,
@@ -506,22 +507,34 @@ export default function App() {
           return;
         }
         
+        let editedText = originalText;
+        let dirty = false;
+        if (route.action === "file_edit" && route.instructions) {
+          const applied = applySimpleEdit(originalText, route.instructions);
+          if (applied !== null) {
+            editedText = applied;
+            dirty = true;
+            console.log("router: applied simple edit");
+          }
+        }
         setShowDiffPanel(true);
         setFileEditState({
           relativePath: resolvedPath,
           baselineText: originalText,
           baselineUpdatedAt: Date.now(),
           originalText,
-          editedText: originalText,
-          dirty: false,
+          editedText,
+          dirty,
           lastSaveStatus: "idle",
         });
         console.log("OPEN_EDITOR", { relativePath: resolvedPath, length: originalText.length });
         console.log("DIFF_PANEL_VISIBLE", true);
-        const editIntent = hasFileEditIntent(p);
-        const assistantMsg = editIntent
-          ? `Opened ${resolvedPath} in editor. Make your changes in the right pane.`
-          : `Opened ${resolvedPath} in editor.`;
+        const appliedEdit = route.action === "file_edit" && dirty;
+        const assistantMsg = appliedEdit
+          ? `Opened ${resolvedPath}. Applied changes.`
+          : route.action === "file_edit"
+            ? `Opened ${resolvedPath} in editor. Make your changes in the right pane.`
+            : `Opened ${resolvedPath}.`;
         setMessages((prev) => [
           ...prev,
           { id: `a-${Date.now()}`, role: "assistant", text: assistantMsg },
@@ -529,8 +542,8 @@ export default function App() {
         return;
       }
 
-      // ROUTING: No file mention detected - proceed with general chat
-      console.log("MESSAGE_ROUTING: chat (no file mention)");
+      // ROUTING: chat (no file action)
+      console.log("MESSAGE_ROUTING: chat");
       setStatusLine("Generating reply…");
       try {
         const inspector = new ProjectInspector(workspace);

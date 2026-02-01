@@ -1,6 +1,7 @@
 export * from "./types";
 export { WorkspaceService } from "./workspace/WorkspaceService";
 export { getRequestedFileHint, readProjectFile, extractFileMentions, hasEditIntent, hasDiffRequest, routeMessage, hasFileEditIntent } from "./workspace/readProjectFile";
+export { routeUserMessage, classifyFileActionIntent, applySimpleEdit } from "./intent";
 export type { ReadProjectFileResult } from "./workspace/readProjectFile";
 export { ProjectInspector } from "./inspect/ProjectInspector";
 export { ProjectDetector } from "./project/ProjectDetector";
