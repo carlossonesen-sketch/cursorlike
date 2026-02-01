@@ -98,6 +98,25 @@ interface Message {
   text: string;
 }
 
+export interface PendingEdit {
+  id: string;
+  targetPath: string;
+  instructions: string;
+  originalContent: string;
+  planText: string;
+  createdAt: number;
+}
+
+function buildEditPlanText(targetPath: string, instructions: string): string {
+  return [
+    "Plan (no AI yet):",
+    `- File: ${targetPath}`,
+    "- Changes:",
+    `  - ${instructions || "(no instructions)"}`,
+    "- Notes: Review in editor before saving.",
+  ].join("\n");
+}
+
 export default function App() {
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
@@ -140,6 +159,7 @@ export default function App() {
     ...DEFAULT_LOCAL_SETTINGS,
   }));
   const [lastFileChoiceCandidates, setLastFileChoiceCandidates] = useState<string[] | null>(null);
+  const [pendingEdit, setPendingEdit] = useState<PendingEdit | null>(null);
   const localSettingsRef = useRef(localSettings);
   const toolRootRef = useRef<string | null>(null);
   const portRef = useRef<number>(11435);
@@ -507,15 +527,38 @@ export default function App() {
           return;
         }
         
-        let editedText = originalText;
-        let dirty = false;
         if (route.action === "file_edit" && route.instructions) {
-          const applied = applySimpleEdit(originalText, route.instructions);
-          if (applied !== null) {
-            editedText = applied;
-            dirty = true;
-            console.log("router: applied simple edit");
+          const planText = buildEditPlanText(resolvedPath, route.instructions);
+          const pending: PendingEdit = {
+            id: `pe-${Date.now()}`,
+            targetPath: resolvedPath,
+            instructions: route.instructions,
+            originalContent: originalText,
+            planText,
+            createdAt: Date.now(),
+          };
+          if (pendingEdit) {
+            setPendingEdit(pending);
+            console.log("plan: replaced pending edit");
+            setMessages((prev) => [
+              ...prev,
+              { id: `a-${Date.now()}`, role: "assistant", text: "Replaced pending edit plan.\n\n" + planText },
+            ]);
+          } else {
+            setPendingEdit(pending);
+            console.log("plan: created");
+            setMessages((prev) => [
+              ...prev,
+              { id: `a-${Date.now()}`, role: "assistant", text: planText },
+            ]);
           }
+        } else {
+          setPendingEdit(null);
+          const assistantMsg = `Opened ${resolvedPath}.`;
+          setMessages((prev) => [
+            ...prev,
+            { id: `a-${Date.now()}`, role: "assistant", text: assistantMsg },
+          ]);
         }
         setShowDiffPanel(true);
         setFileEditState({
@@ -523,22 +566,12 @@ export default function App() {
           baselineText: originalText,
           baselineUpdatedAt: Date.now(),
           originalText,
-          editedText,
-          dirty,
+          editedText: originalText,
+          dirty: false,
           lastSaveStatus: "idle",
         });
         console.log("OPEN_EDITOR", { relativePath: resolvedPath, length: originalText.length });
         console.log("DIFF_PANEL_VISIBLE", true);
-        const appliedEdit = route.action === "file_edit" && dirty;
-        const assistantMsg = appliedEdit
-          ? `Opened ${resolvedPath}. Applied changes.`
-          : route.action === "file_edit"
-            ? `Opened ${resolvedPath} in editor. Make your changes in the right pane.`
-            : `Opened ${resolvedPath}.`;
-        setMessages((prev) => [
-          ...prev,
-          { id: `a-${Date.now()}`, role: "assistant", text: assistantMsg },
-        ]);
         return;
       }
 
@@ -580,7 +613,7 @@ export default function App() {
         setStatusLine(null);
       }
     },
-    [workspacePath, selectedPaths, manifest, useKnowledgePacks, projectSnapshot, enabledPacks, lastFileChoiceCandidates, fetchSessionsAndResume]
+    [workspacePath, selectedPaths, manifest, useKnowledgePacks, projectSnapshot, enabledPacks, lastFileChoiceCandidates, fetchSessionsAndResume, pendingEdit]
   );
 
   const proposePatch = useCallback(
@@ -869,6 +902,55 @@ export default function App() {
     await fetchSessionsAndResume();
   }, [workspacePath, planAndPatch, currentProposedSessionId, fetchSessionsAndResume]);
 
+  const applyPendingEdit = useCallback(async () => {
+    if (!workspace.root || !pendingEdit) return;
+    const { targetPath, instructions, originalContent } = pendingEdit;
+    const applied = applySimpleEdit(originalContent, instructions);
+    if (applied === null) {
+      setMessages((prev) => [
+        ...prev,
+        { id: `a-${Date.now()}`, role: "assistant", text: "Could not apply edit (pattern not matched)." },
+      ]);
+      setPendingEdit(null);
+      return;
+    }
+    try {
+      await workspace.writeFile(workspace.root, targetPath, applied);
+      setFileEditState((prev) =>
+        prev && prev.relativePath === targetPath
+          ? {
+              ...prev,
+              originalText: applied,
+              editedText: applied,
+              dirty: false,
+            }
+          : prev
+      );
+      setPendingEdit(null);
+      console.log("plan: applied");
+      setMessages((prev) => [
+        ...prev,
+        { id: `a-${Date.now()}`, role: "assistant", text: `Applied changes to ${targetPath}.` },
+      ]);
+    } catch (e) {
+      setMessages((prev) => [
+        ...prev,
+        { id: `a-${Date.now()}`, role: "assistant", text: `Error applying: ${String(e)}` },
+      ]);
+    }
+  }, [pendingEdit]);
+
+  const cancelPendingEdit = useCallback(() => {
+    if (pendingEdit) {
+      setPendingEdit(null);
+      console.log("plan: canceled");
+      setMessages((prev) => [
+        ...prev,
+        { id: `a-${Date.now()}`, role: "assistant", text: "Canceled. No changes applied." },
+      ]);
+    }
+  }, [pendingEdit]);
+
   const toggleViewDiff = useCallback(() => {
     setShowDiffPanel((v) => {
       if (v && fileEditState?.dirty && !window.confirm("Unsaved changes. Close anyway?")) return true;
@@ -1101,6 +1183,9 @@ export default function App() {
           onSaveLater={saveLater}
           onViewDiff={toggleViewDiff}
           showingDiff={showDiffPanel}
+          pendingEdit={pendingEdit}
+          onApplyPendingEdit={applyPendingEdit}
+          onCancelPendingEdit={cancelPendingEdit}
         />
         <FilesPane
           fileTree={fileTree}

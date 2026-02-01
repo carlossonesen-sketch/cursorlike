@@ -57,6 +57,9 @@ interface ConversationPaneProps {
   onSaveLater: () => void;
   onViewDiff: () => void;
   showingDiff: boolean;
+  pendingEdit: import("../App").PendingEdit | null;
+  onApplyPendingEdit: () => void;
+  onCancelPendingEdit: () => void;
 }
 
 export function ConversationPane({
@@ -97,6 +100,9 @@ export function ConversationPane({
   onSaveLater,
   onViewDiff,
   showingDiff,
+  pendingEdit,
+  onApplyPendingEdit,
+  onCancelPendingEdit,
 }: ConversationPaneProps) {
   const [prompt, setPrompt] = useState("");
   const [knowledgeExpanded, setKnowledgeExpanded] = useState(false);
@@ -152,7 +158,7 @@ export function ConversationPane({
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, planAndPatch, plannerOutput, reviewerOutput]);
+  }, [messages, planAndPatch, plannerOutput, reviewerOutput, pendingEdit]);
 
   useEffect(() => {
     setExpandedChunkIndices(new Set());
@@ -204,6 +210,20 @@ export function ConversationPane({
             <strong>Reviewer</strong>
             <p>{reviewerOutput.reviewNotes}</p>
             <p className="muted">Recommended checks: {reviewerOutput.recommendedChecks.join(", ")}</p>
+          </div>
+        )}
+        {pendingEdit && (
+          <div className="message assistant">
+            <strong>Edit plan</strong>
+            <pre className="plan-text">{pendingEdit.planText}</pre>
+            <div className="plan-actions">
+              <button type="button" className="btn primary" onClick={onApplyPendingEdit}>
+                Apply
+              </button>
+              <button type="button" className="btn" onClick={onCancelPendingEdit}>
+                Cancel
+              </button>
+            </div>
           </div>
         )}
         {planAndPatch && (
