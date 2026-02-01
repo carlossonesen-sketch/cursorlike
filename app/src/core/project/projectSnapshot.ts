@@ -1,5 +1,6 @@
 /**
  * Read/write project snapshot at .devassistant/project_snapshot.json
+ * Supports both legacy format and new extended format (snapshotVersion 1).
  */
 
 import { invoke } from "@tauri-apps/api/core";
@@ -15,15 +16,27 @@ export async function readProjectSnapshot(
       workspaceRoot,
       path: SNAPSHOT_PATH,
     });
-    const data = JSON.parse(raw) as ProjectSnapshot & { updatedAt?: string };
-    if (!Array.isArray(data.detectedTypes) || !Array.isArray(data.recommendedPacks)) {
+    const data = JSON.parse(raw) as ProjectSnapshot & {
+      updatedAt?: string;
+      snapshotVersion?: number;
+      detectedType?: string;
+    };
+    const detectedTypes = Array.isArray(data.detectedTypes)
+      ? data.detectedTypes
+      : data.detectedType
+        ? [data.detectedType]
+        : [];
+    const recommendedPacks = Array.isArray(data.recommendedPacks)
+      ? data.recommendedPacks
+      : [];
+    if (detectedTypes.length === 0 && recommendedPacks.length === 0) {
       return null;
     }
     return {
-      detectedTypes: data.detectedTypes ?? [],
-      recommendedPacks: data.recommendedPacks ?? [],
-      enabledPacks: data.enabledPacks ?? [],
-      importantFiles: data.importantFiles ?? [],
+      detectedTypes,
+      recommendedPacks,
+      enabledPacks: Array.isArray(data.enabledPacks) ? data.enabledPacks : [],
+      importantFiles: Array.isArray(data.importantFiles) ? data.importantFiles : [],
       detectedCommands: data.detectedCommands ?? {},
       generatedAt: data.generatedAt ?? data.updatedAt,
     };

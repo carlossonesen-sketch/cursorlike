@@ -49,6 +49,16 @@ From repo root, `launcher/Start-Assistant.cmd` (or `.ps1`) launches the built Ta
 - `src/core/`: WorkspaceService, ProjectInspector, ContextBuilder, ModelGateway (mock), PatchEngine, MemoryStore
 - `src/components/`: TopBar, ConversationPane, FilesPane, ProposalCard
 
+## Snapshot smoke test
+
+From repo root, run the snapshot smoke test (tests pure detection logic):
+
+```bash
+cd app && npm run snapshot:smoke
+```
+
+Or: `npx tsx scripts/dev_snapshot_smoke.ts` from repo root. Full snapshot generation runs when you open a workspace in the app; output is written to `.devassistant/project_snapshot.json`.
+
 ## Verify flow
 
 1. **Open Workspace** → pick folder. Top bar shows path.

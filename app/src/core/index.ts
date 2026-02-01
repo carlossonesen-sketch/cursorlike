@@ -6,6 +6,17 @@ export { ProjectInspector } from "./inspect/ProjectInspector";
 export { ProjectDetector } from "./project/ProjectDetector";
 export type { ProjectDetectorResult } from "./project/ProjectDetector";
 export { readProjectSnapshot, writeProjectSnapshot } from "./project/projectSnapshot";
+export { detectProjectRoot, inferDetectedType } from "./project/projectRoot";
+export type { ProjectRootResult, DetectedType } from "./project/projectRoot";
+export { getDefaultEnabledPackIds } from "./knowledge/autoEnablePacks";
+export type { ProjectInfo } from "./knowledge/autoEnablePacks";
+export {
+  generateSnapshotData,
+  writeProjectSnapshotFile,
+  getSnapshotOutputPath,
+  shouldIgnorePathSegment,
+} from "./project/snapshot";
+export type { ProjectSnapshotJson, SnapshotFileEntry } from "./project/snapshot";
 export { readWorkspaceSettings, writeWorkspaceSettings } from "./project/workspaceSettings";
 export { ContextBuilder } from "./context/ContextBuilder";
 export {

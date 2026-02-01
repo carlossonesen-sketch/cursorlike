@@ -1,3 +1,4 @@
+mod project_root;
 mod runtime;
 mod toolroot;
 mod workspace;
@@ -22,6 +23,8 @@ pub fn run() {
             workspace::workspace_ensure_log_dir,
             workspace::workspace_append_file,
             workspace::workspace_search_files_by_name,
+            workspace::workspace_walk_snapshot,
+            project_root::detect_project_root,
             toolroot::find_tool_root,
             toolroot::scan_models_for_gguf,
             toolroot::scan_models_for_gguf_by_mtime,

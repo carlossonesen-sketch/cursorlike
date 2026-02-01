@@ -1,5 +1,6 @@
 //! Workspace-scoped filesystem operations. All paths validated against root; no writes outside.
 
+use chrono::Utc;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -270,4 +271,127 @@ fn sort_search_results(matches: &mut [String], search_lower: &str) {
             .then(a_len.cmp(&b_len))
             .then(a.cmp(b))
     });
+}
+
+// --- Snapshot walk ---
+
+const SNAPSHOT_IGNORED: &[&str] = &[
+    "node_modules", ".git", "dist", "build", ".next", "out", ".turbo", ".cache",
+    "coverage", "target", ".venv", "venv", "__pycache__", ".DS_Store", ".devassistant",
+];
+const SNAPSHOT_MAX_DEPTH: u32 = 25;
+const SNAPSHOT_MAX_FILES: usize = 2000;
+const SNAPSHOT_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024; // 2MB
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotFileEntry {
+    pub path: String,
+    pub size_bytes: u64,
+    pub modified_at: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WalkSnapshotResult {
+    pub total_files: u64,
+    pub total_dirs: u64,
+    pub files: Vec<SnapshotFileEntry>,
+    pub top_level: Vec<String>,
+}
+
+#[tauri::command]
+pub fn workspace_walk_snapshot(
+    workspace_root: String,
+) -> Result<WalkSnapshotResult, String> {
+    let root = Path::new(&workspace_root);
+    if !root.is_absolute() {
+        return Err("workspace_root must be absolute".into());
+    }
+    let root_canon = root.canonicalize().map_err(|e| e.to_string())?;
+
+    let mut total_files: u64 = 0;
+    let mut total_dirs: u64 = 0;
+    let mut files: Vec<SnapshotFileEntry> = Vec::new();
+    let mut top_level: Vec<String> = Vec::new();
+
+    let mut stack: Vec<(PathBuf, u32, String)> = vec![(root_canon.clone(), 0, String::new())];
+
+    while let Some((dir, depth, rel_prefix)) = stack.pop() {
+        if depth > SNAPSHOT_MAX_DEPTH {
+            continue;
+        }
+        if files.len() >= SNAPSHOT_MAX_FILES {
+            break;
+        }
+
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        for e in entries.flatten() {
+            let ft = e.file_type();
+            if ft.as_ref().map(|t| t.is_symlink()).unwrap_or(false) {
+                continue;
+            }
+            let name = e.file_name().to_string_lossy().into_owned();
+            let is_dir = ft.map(|t| t.is_dir()).unwrap_or(false);
+            let rel_path = if rel_prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{}", rel_prefix, name)
+            };
+
+            if is_dir {
+                if SNAPSHOT_IGNORED.iter().any(|&d| d.eq_ignore_ascii_case(&name)) {
+                    continue;
+                }
+                total_dirs += 1;
+                if depth == 0 {
+                    top_level.push(name.clone());
+                }
+                let full = dir.join(&name);
+                stack.push((full, depth + 1, rel_path));
+            } else {
+                total_files += 1;
+                if depth == 0 {
+                    top_level.push(name.clone());
+                }
+                let full = dir.join(&name);
+                let size = std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
+                let modified = std::fs::metadata(&full)
+                    .and_then(|m| m.modified())
+                    .ok();
+                let modified_iso = modified
+                    .and_then(|t| {
+                        t.duration_since(std::time::UNIX_EPOCH)
+                            .ok()
+                            .and_then(|d| {
+                                Utc.timestamp_opt(d.as_secs() as i64, 0)
+                                    .single()
+                                    .map(|dt| dt.to_rfc3339())
+                            })
+                    })
+                    .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string());
+
+                if size <= SNAPSHOT_MAX_FILE_BYTES && files.len() < SNAPSHOT_MAX_FILES {
+                    files.push(SnapshotFileEntry {
+                        path: rel_path.replace('\\', "/"),
+                        size_bytes: size,
+                        modified_at: modified_iso,
+                    });
+                }
+            }
+        }
+    }
+
+    top_level.sort();
+
+    Ok(WalkSnapshotResult {
+        total_files,
+        total_dirs,
+        files,
+        top_level,
+    })
 }

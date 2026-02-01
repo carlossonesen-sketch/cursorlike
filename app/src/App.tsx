@@ -35,6 +35,11 @@ import {
   hasDiffRequest,
   routeMessage,
   hasFileEditIntent,
+  detectProjectRoot,
+  getDefaultEnabledPackIds,
+  generateSnapshotData,
+  writeProjectSnapshotFile,
+  getSnapshotOutputPath,
 } from "./core";
 import type {
   FileTreeNode,
@@ -248,19 +253,57 @@ export default function App() {
     setToolRoot(null);
     setStatusLine("Scanning workspace…");
     try {
+      const root = workspace.root ?? path;
+
+      const projectRootResult = await detectProjectRoot(root);
+      console.log("[init] project root:", projectRootResult.rootPath, "type:", projectRootResult.detectedType, "signals:", projectRootResult.signalsFound);
+
       const inspector = new ProjectInspector(workspace);
       const m = await inspector.buildManifest();
       setManifest(m);
       const tree = await workspace.readFileTree();
       setFileTree(tree);
-      const root = workspace.root ?? path;
       const detector = new ProjectDetector(workspace);
       const detected = await detector.detect();
       const settings = await readWorkspaceSettings(root);
+
+      const availablePacks = [
+        ...new Set([...detected.recommendedPacks, "powershell", "python", "typescript", "javascript", "node", "rust"]),
+      ];
+      const defaultPacks = !settings.enabledPacks?.length
+        ? getDefaultEnabledPackIds(projectRootResult, availablePacks)
+        : settings.enabledPacks;
       const enabled =
         settings.autoPacksEnabled
-          ? detected.recommendedPacks
-          : (settings.enabledPacks?.length ? settings.enabledPacks : detected.recommendedPacks);
+          ? (settings.enabledPacks?.length ? settings.enabledPacks : defaultPacks)
+          : (settings.enabledPacks?.length ? settings.enabledPacks : defaultPacks);
+      console.log("[init] enabled packs:", enabled);
+
+      const existingSnapshot = await readProjectSnapshot(root);
+      const snapshotPath = getSnapshotOutputPath(root);
+      const existingAge = existingSnapshot?.generatedAt
+        ? (Date.now() - new Date(existingSnapshot.generatedAt).getTime()) / 3600000
+        : Infinity;
+      const needsSnapshot = !existingSnapshot || existingAge > 24;
+      if (needsSnapshot) {
+        console.log("[init] generating snapshot (missing or >24h old), path:", snapshotPath);
+        const fullSnapshot = await generateSnapshotData(
+          root,
+          projectRootResult.detectedType,
+          projectRootResult.signalsFound,
+          {
+            detectedTypes: detected.detectedTypes,
+            recommendedPacks: detected.recommendedPacks,
+            importantFiles: detected.importantFiles,
+            detectedCommands: detected.detectedCommands,
+            enabledPacks: enabled,
+          }
+        );
+        await writeProjectSnapshotFile(root, fullSnapshot);
+      } else {
+        console.log("[init] snapshot fresh, path:", snapshotPath);
+      }
+
       const tr = await findToolRoot(root);
       setToolRoot(tr);
       setPort(settings.port ?? 11435);
