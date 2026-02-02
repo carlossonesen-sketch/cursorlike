@@ -1,3 +1,5 @@
+﻿// NOTE: temporary comment added for testing the file-edit flow.
+
 import { useState, useCallback, useRef, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -35,12 +37,23 @@ import {
   hasDiffRequest,
   routeUserMessage,
   hasFileEditIntent,
-  applySimpleEdit,
+  generateFileEdit,
   detectProjectRoot,
   getDefaultEnabledPackIds,
   generateSnapshotData,
   writeProjectSnapshotFile,
   getSnapshotOutputPath,
+  runVerificationChecks,
+  detectMissingPrereqs,
+  getVerifyProfile,
+  getPrereqById,
+  getRecommendations,
+  checkRecommendedPrereqs,
+  generateMultiFileProposal,
+  generateProposalSummary,
+  validateAndFixSummary,
+  buildProposalGroundTruth,
+  pickVerifyProfileFromSignals,
 } from "./core";
 import type {
   FileTreeNode,
@@ -51,12 +64,15 @@ import type {
   AgentMode,
   ProjectSnapshot,
 } from "./core/types";
-import type { Provider, LocalModelSettings } from "./core";
+import type { Provider, LocalModelSettings, Prereq, MissingPrereqResult, RecommendedPrereqResult, MultiFileProposal, ProposedFileChange, DevMode } from "./core/types";
 import type { FileSnapshot } from "./core/patch/PatchEngine";
+import { diffLines } from "diff";
 import type { ResumeSuggestion } from "./core";
 import { TopBar } from "./components/TopBar";
 import { ConversationPane } from "./components/ConversationPane";
 import { FilesPane } from "./components/FilesPane";
+import { PrerequisitesPanel } from "./components/PrerequisitesPanel";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import "./App.css";
 
 const workspace = new WorkspaceService();
@@ -98,23 +114,75 @@ interface Message {
   text: string;
 }
 
-export interface PendingEdit {
-  id: string;
-  targetPath: string;
-  instructions: string;
-  originalContent: string;
-  planText: string;
-  createdAt: number;
+export type DiffLineType = "added" | "removed" | "context";
+
+export interface DiffLine {
+  type: DiffLineType;
+  content: string;
 }
 
-function buildEditPlanText(targetPath: string, instructions: string): string {
-  return [
-    "Plan (no AI yet):",
-    `- File: ${targetPath}`,
-    "- Changes:",
-    `  - ${instructions || "(no instructions)"}`,
-    "- Notes: Review in editor before saving.",
-  ].join("\n");
+export interface PendingEditFile {
+  path: string;
+  original: string;
+  proposed: string;
+  diff: DiffLine[];
+}
+
+export interface PendingEdit {
+  id: string;
+  files: PendingEditFile[];
+  instructions: string;
+  createdAt: number;
+  selectedIndex: number;
+  summary?: import("./core/types").ChangeSummary | null;
+}
+
+/** Proposal stack: max 5, one active at a time. */
+export type ProposalStatus = "pending" | "applied" | "discarded" | "superseded";
+
+export interface ProposalSummary {
+  id: string;
+  type: "single" | "multi";
+  fileCount: number;
+  createdAt: number;
+  status: ProposalStatus;
+}
+
+export interface ProposalEntry extends ProposalSummary {
+  pendingEdit?: PendingEdit | null;
+  multiFileProposal?: MultiFileProposal | null;
+  includedFilePaths?: Record<string, boolean>;
+}
+
+const MAX_PROPOSALS = 5;
+
+/** Snapshot of files before apply; used for Revert last apply. */
+export interface ApplySnapshotChange {
+  path: string;
+  existedBefore: boolean;
+  previousContent: string;
+  wasCreated: boolean;
+}
+
+export interface ApplySnapshot {
+  id: string;
+  createdAt: number;
+  root: string;
+  changes: ApplySnapshotChange[];
+}
+
+function computeDiffLines(original: string, proposed: string): DiffLine[] {
+  const changes = diffLines(original, proposed);
+  const lines: DiffLine[] = [];
+  for (const change of changes) {
+    const lineList = change.value.split(/\r?\n/);
+    if (lineList.length > 1 && lineList[lineList.length - 1] === "") lineList.pop();
+    const type: DiffLineType = change.removed ? "removed" : change.added ? "added" : "context";
+    for (const line of lineList) {
+      lines.push({ type, content: line });
+    }
+  }
+  return lines;
 }
 
 export default function App() {
@@ -159,7 +227,42 @@ export default function App() {
     ...DEFAULT_LOCAL_SETTINGS,
   }));
   const [lastFileChoiceCandidates, setLastFileChoiceCandidates] = useState<string[] | null>(null);
-  const [pendingEdit, setPendingEdit] = useState<PendingEdit | null>(null);
+  const [proposalStack, setProposalStack] = useState<ProposalEntry[]>([]);
+  const [activeProposalId, setActiveProposalId] = useState<string | null>(null);
+  const [selectedMultiFileIndex, setSelectedMultiFileIndex] = useState(0);
+
+  const activeEntry = proposalStack.find((p) => p.id === activeProposalId) ?? null;
+  const pendingEdit = activeEntry?.type === "single" ? (activeEntry.pendingEdit ?? null) : null;
+  const multiFileProposal = activeEntry?.type === "multi" ? (activeEntry.multiFileProposal ?? null) : null;
+  const includedFilePaths = activeEntry?.includedFilePaths ?? {};
+
+  const addProposalToStackWithConfirm = useCallback((entry: ProposalEntry): boolean => {
+    if (proposalStack.length < MAX_PROPOSALS) {
+      setProposalStack((prev) => [...prev, entry]);
+      setActiveProposalId(entry.id);
+      return true;
+    }
+    const ok = window.confirm(
+      `You have ${MAX_PROPOSALS} proposals. Discard the oldest pending proposal to make room?`
+    );
+    if (!ok) return false;
+    const pendingByAge = [...proposalStack].filter((e) => e.status === "pending").sort((a, b) => a.createdAt - b.createdAt);
+    const toRemove = pendingByAge[0] ?? [...proposalStack].sort((a, b) => a.createdAt - b.createdAt)[0];
+    const withoutOldest = toRemove ? proposalStack.filter((e) => e.id !== toRemove.id) : proposalStack.slice(1);
+    setProposalStack([...withoutOldest, entry]);
+    setActiveProposalId(entry.id);
+    return true;
+  }, [proposalStack]);
+
+  const [lastApplySnapshot, setLastApplySnapshot] = useState<ApplySnapshot | null>(null);
+  const [verificationResults, setVerificationResults] = useState<VerificationResult | null>(null);
+  const [missingPrereqs, setMissingPrereqs] = useState<MissingPrereqResult[]>([]);
+  const [recommendedPrereqs, setRecommendedPrereqs] = useState<RecommendedPrereqResult[]>([]);
+  const [recommendedReasoning, setRecommendedReasoning] = useState<Record<string, string>>({});
+  const [includeRecommendations, setIncludeRecommendations] = useState(false);
+  const [devMode, setDevMode] = useState<DevMode>("fast");
+  const [installLog, setInstallLog] = useState<string | null>(null);
+  const [installInProgress, setInstallInProgress] = useState(false);
   const localSettingsRef = useRef(localSettings);
   const toolRootRef = useRef<string | null>(null);
   const portRef = useRef<number>(11435);
@@ -235,7 +338,7 @@ export default function App() {
   const refreshSnapshot = useCallback(async () => {
     const root = workspace.root;
     if (!root) return;
-    setStatusLine("Refreshing snapshot…");
+    setStatusLine("Refreshing snapshotâ€¦");
     try {
       const detector = new ProjectDetector(workspace);
       const detected = await detector.detect();
@@ -272,7 +375,7 @@ export default function App() {
     setProjectSnapshot(null);
     setEnabledPacks([]);
     setToolRoot(null);
-    setStatusLine("Scanning workspace…");
+    setStatusLine("Scanning workspaceâ€¦");
     try {
       const root = workspace.root ?? path;
 
@@ -339,10 +442,11 @@ export default function App() {
       const newSettings = {
         autoPacksEnabled: settings.autoPacksEnabled,
         enabledPacks: enabled,
+        devMode: settings.devMode ?? "fast",
         modelPath: modelPathNext,
         port: settings.port ?? 11435,
       };
-      await writeWorkspaceSettings(root, newSettings);
+      await writeWorkspaceSettings(root, newSettings).catch(() => {});
       setModelPath(modelPathNext);
       setLocalSettings((prev) => ({
         ...prev,
@@ -359,6 +463,7 @@ export default function App() {
       setProjectSnapshot(snapshot);
       setEnabledPacks(enabled);
       setAutoPacksEnabled(settings.autoPacksEnabled);
+      setDevMode(settings.devMode ?? "fast");
       await fetchSessionsAndResume();
     } catch (e) {
       console.error("openWorkspace", e);
@@ -430,7 +535,7 @@ export default function App() {
         const cmd = p.slice(1).trim().toLowerCase().split(/\s+/)[0] || "";
         let reply: string;
         if (cmd === "help") {
-          reply = "Commands: /help — this message; /snapshot — project snapshot.";
+          reply = "Commands: /help â€” this message; /snapshot â€” project snapshot.";
         } else if (cmd === "snapshot") {
           reply = projectSnapshot
             ? `Types: ${projectSnapshot.detectedTypes.join(", ")}. Packs: ${projectSnapshot.enabledPacks.join(", ")}.`
@@ -446,51 +551,182 @@ export default function App() {
       }
 
       // ROUTING: File actions FIRST, before any chat logic
-      const route = routeUserMessage(p);
+      const activeFilePath = fileEditState?.relativePath ?? undefined;
+      const route = routeUserMessage(p, { activeFilePath, currentOpenFilePath: activeFilePath, workspaceRoot: root });
       console.log("MESSAGE_ROUTING:", route);
 
+      // Multi-file edit: generate proposal via LLM
+      if (route.action === "multi_file_edit") {
+        setStatusLine("Generating multi-file proposalâ€¦");
+        try {
+          setFileEditState(null);
+          const inspector = new ProjectInspector(workspace);
+          const m = manifest ?? (await inspector.buildManifest());
+          if (!manifest) setManifest(m);
+          const manifestSummary = m
+            ? `Types: ${m.projectTypes.join(", ")}; Config: ${m.configFiles.slice(0, 8).join(", ")}; Files: ${m.fileList.slice(0, 30).join(", ")}`
+            : undefined;
+          const hintPaths = "targetHints" in route && route.targetHints ? route.targetHints : [];
+          const contextPaths = hintPaths.length > 0
+            ? hintPaths.slice(0, 5)
+            : selectedPaths.length > 0
+              ? selectedPaths.slice(0, 5)
+              : (projectSnapshot?.importantFiles ?? m?.fileList ?? []).slice(0, 5);
+          const contextFiles: { path: string; content: string }[] = [];
+          for (const path of contextPaths) {
+            try {
+              const content = await workspace.readFile(path);
+              contextFiles.push({ path, content });
+            } catch {
+              /* skip */
+            }
+          }
+          const proposal = await generateMultiFileProposal({
+            userPrompt: route.instructions,
+            contextFiles,
+            manifestSummary,
+          });
+          if (proposal && proposal.files.length > 0) {
+            const included: Record<string, boolean> = {};
+            const verifiedFiles = await Promise.all(
+              proposal.files.map(async (f) => {
+                const exists = await workspace.exists(f.path);
+                if (exists) {
+                  try {
+                    const actual = await workspace.readFile(f.path);
+                    return { ...f, exists: true, originalContent: actual };
+                  } catch {
+                    return { ...f, exists: true, originalContent: f.originalContent };
+                  }
+                }
+                return { ...f, exists: false, originalContent: "" };
+              })
+            );
+            const verifiedProposal = { ...proposal, files: verifiedFiles };
+            for (const f of verifiedProposal.files) {
+              included[f.path] = true; // default ON
+            }
+            setStatusLine("Generating summaryâ€¦");
+            const multiGroundTruth = buildProposalGroundTruth(verifiedProposal.files);
+            const multiSummaryRaw = await generateProposalSummary({
+              type: "grounded",
+              groundTruth: multiGroundTruth,
+              plan: verifiedProposal.plan,
+            });
+            const getMultiProposed = (path: string) =>
+              verifiedProposal.files.find((f) => f.path === path)?.proposedContent ?? "";
+            const multiSummary = multiSummaryRaw
+              ? validateAndFixSummary(multiSummaryRaw, {
+                  groundTruth: multiGroundTruth,
+                  getProposedContent: getMultiProposed,
+                })
+              : null;
+            if (multiSummary) verifiedProposal.summary = multiSummary;
+            setStatusLine(null);
+            const multiId = `multi-${Date.now()}`;
+            const multiEntry: ProposalEntry = {
+              id: multiId,
+              type: "multi",
+              fileCount: verifiedProposal.files.length,
+              createdAt: Date.now(),
+              status: "pending",
+              multiFileProposal: verifiedProposal,
+              includedFilePaths: included,
+            };
+            if (!addProposalToStackWithConfirm(multiEntry)) {
+              setMessages((prev) => [
+                ...prev,
+                { id: `a-${Date.now()}`, role: "assistant", text: "Proposal not added (stack full). Discard one to make room." },
+              ]);
+              return;
+            }
+            setShowDiffPanel(true);
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `a-${Date.now()}`,
+                role: "assistant",
+                text: `Proposal for ${proposal.files.length} file(s). Review and Apply Selected or Cancel.`,
+              },
+            ]);
+          } else {
+            setMessages((prev) => [
+              ...prev,
+              { id: `a-${Date.now()}`, role: "assistant", text: "Could not generate proposal. Try being more specific about which files to change." },
+            ]);
+          }
+        } catch (e) {
+          console.error("generateMultiFileProposal error:", e);
+          setMessages((prev) => [
+            ...prev,
+            { id: `a-${Date.now()}`, role: "assistant", text: `Error: ${String(e)}` },
+          ]);
+        } finally {
+          setStatusLine(null);
+        }
+        return;
+      }
+
       if (route.action === "file_open" || route.action === "file_edit") {
-        const fileHint = route.targetPath;
-        const result = await readProjectFile(
-          root,
-          fileHint,
-          (path) => workspace.readFile(path),
-          (path) => workspace.exists(path),
-          (wr, name) => workspace.searchFilesByName(wr, name)
-        );
-        if ("error" in result && result.error === "multiple") {
-          const list = result.candidates
-            .map((path, i) => `${i + 1}. ${path}`)
-            .join("\n");
-          setLastFileChoiceCandidates(result.candidates);
-          setMessages((prev) => [
-            ...prev,
-            { id: `a-${Date.now()}`, role: "assistant", text: `Which file?\n${list}\n\nReply with a number.` },
-          ]);
-          return;
-        }
-        if ("error" in result) {
-          setMessages((prev) => [
-            ...prev,
-            { id: `a-${Date.now()}`, role: "assistant", text: `${result.path} not found.` },
-          ]);
-          return;
-        }
-        const resolvedPath = result.path;
-        const originalText = result.content;
-        const diffRequest = hasDiffRequest(p);
+        const isEdit = route.action === "file_edit";
+        const hints = isEdit ? route.targets : [route.targetPath];
+
+        const resolveOne = async (hint: string) =>
+          readProjectFile(
+            root,
+            hint,
+            (path) => workspace.readFile(path),
+            (path) => workspace.exists(path),
+            (wr, name) => workspace.searchFilesByName(wr, name)
+          );
+
+        // Check if this is a create-file request
+        const isCreateRequest = /\b(create|write|make|new)\b/i.test(p);
         
+        const resolved: { path: string; content: string; isNewFile: boolean }[] = [];
+        for (const hint of hints) {
+          const result = await resolveOne(hint);
+          if ("error" in result && result.error === "multiple") {
+            const list = result.candidates.map((path, i) => `${i + 1}. ${path}`).join("\n");
+            setLastFileChoiceCandidates(result.candidates);
+            setMessages((prev) => [
+              ...prev,
+              { id: `a-${Date.now()}`, role: "assistant", text: `Which file for "${hint}"?\n${list}\n\nReply with a number.` },
+            ]);
+            return;
+          }
+          if ("error" in result) {
+            // For create requests, allow creating a new file
+            if (isCreateRequest) {
+              resolved.push({ path: result.path, content: "", isNewFile: true });
+            } else {
+              setMessages((prev) => [
+                ...prev,
+                { id: `a-${Date.now()}`, role: "assistant", text: `${result.path} not found.` },
+              ]);
+              return;
+            }
+          } else {
+            resolved.push({ path: result.path, content: result.content, isNewFile: false });
+          }
+        }
+
+        const first = resolved[0];
+        const resolvedPath = first.path;
+        const originalText = first.content;
+        const diffRequest = hasDiffRequest(p);
+
         if (diffRequest) {
-          setStatusLine("Generating patch…");
+          setStatusLine("Generating patchâ€¦");
           try {
             setFileEditState(null);
-            setSelectedPaths([resolvedPath]);
+            setSelectedPaths(resolved.map((r) => r.path));
             const inspector = new ProjectInspector(workspace);
             const m = manifest ?? (await inspector.buildManifest());
             if (!manifest) setManifest(m);
             const ctxBuilder = new ContextBuilder(workspace, m);
             const knowledgeStore = useKnowledgePacks ? new KnowledgeStore(root, workspace) : null;
-            const ctx = await ctxBuilder.build(p, [resolvedPath], {
+            const ctx = await ctxBuilder.build(p, resolved.map((r) => r.path), {
               useKnowledge: useKnowledgePacks,
               knowledgeStore: knowledgeStore ?? undefined,
               agentRole: "coder",
@@ -508,7 +744,7 @@ export default function App() {
             setAppState("patchProposed");
             setShowDiffPanel(true);
             const store = new MemoryStore(root);
-            const record = await store.addProposedSession(p, [resolvedPath], patchResult.explanation, patchResult.patch);
+            const record = await store.addProposedSession(p, resolved.map((r) => r.path), patchResult.explanation, patchResult.patch);
             setCurrentProposedSessionId(record.id);
             await fetchSessionsAndResume();
             setMessages((prev) => [
@@ -526,58 +762,117 @@ export default function App() {
           }
           return;
         }
-        
-        if (route.action === "file_edit" && route.instructions) {
-          const planText = buildEditPlanText(resolvedPath, route.instructions);
-          const pending: PendingEdit = {
-            id: `pe-${Date.now()}`,
-            targetPath: resolvedPath,
-            instructions: route.instructions,
-            originalContent: originalText,
-            planText,
-            createdAt: Date.now(),
-          };
-          if (pendingEdit) {
-            setPendingEdit(pending);
-            console.log("plan: replaced pending edit");
+
+        const targets = resolved.map((r) => r.path);
+        if (isEdit && route.instructions) {
+          setStatusLine("Generating edit proposalâ€¦");
+          try {
+            const files: PendingEditFile[] = [];
+            for (const r of resolved) {
+              // Use model-based generation for complex edits
+              const editResult = await generateFileEdit({
+                filePath: r.path,
+                originalContent: r.content,
+                instructions: route.instructions,
+                isNewFile: r.isNewFile,
+              });
+              const diff = computeDiffLines(r.content, editResult.proposedContent);
+              files.push({ path: r.path, original: r.content, proposed: editResult.proposedContent, diff });
+            }
+            const peId = `pe-${Date.now()}`;
+            const firstFile = files[0];
+            setStatusLine("Generating summaryâ€¦");
+            const singleGroundTruth = buildProposalGroundTruth(
+              files.map((f, i) => ({
+                path: f.path,
+                original: f.original,
+                proposed: f.proposed,
+                exists: !resolved[i]?.isNewFile,
+              }))
+            );
+            const summaryRaw = await generateProposalSummary({
+              type: "grounded",
+              groundTruth: singleGroundTruth,
+              plan: [route.instructions.slice(0, 200)],
+            });
+            const getSingleProposed = (path: string) => files.find((f) => f.path === path)?.proposed ?? "";
+            const summary = summaryRaw
+              ? validateAndFixSummary(summaryRaw, {
+                  groundTruth: singleGroundTruth,
+                  getProposedContent: getSingleProposed,
+                })
+              : null;
+            const pending: PendingEdit = {
+              id: peId,
+              files,
+              instructions: route.instructions,
+              createdAt: Date.now(),
+              selectedIndex: 0,
+              summary: summary ?? undefined,
+            };
+            setStatusLine(null);
+            const singleEntry: ProposalEntry = {
+              id: peId,
+              type: "single",
+              fileCount: files.length,
+              createdAt: Date.now(),
+              status: "pending",
+              pendingEdit: pending,
+            };
+            if (!addProposalToStackWithConfirm(singleEntry)) {
+              setMessages((prev) => [
+                ...prev,
+                { id: `a-${Date.now()}`, role: "assistant", text: "Proposal not added (stack full). Discard one to make room." },
+              ]);
+              return;
+            }
+            setFileEditState(null);
+            const newFileNote = resolved.some((r) => r.isNewFile) ? " (new file)" : "";
             setMessages((prev) => [
               ...prev,
-              { id: `a-${Date.now()}`, role: "assistant", text: "Replaced pending edit plan.\n\n" + planText },
+              {
+                id: `a-${Date.now()}`,
+                role: "assistant",
+                text: `Edit plan for ${files.length} file(s)${newFileNote}. Review diff and Apply or Cancel.`,
+              },
             ]);
-          } else {
-            setPendingEdit(pending);
-            console.log("plan: created");
+            setShowDiffPanel(true);
+            console.log("OPEN_EDITOR", { pendingFiles: files.length });
+          } catch (e) {
+            console.error("generateFileEdit error:", e);
             setMessages((prev) => [
               ...prev,
-              { id: `a-${Date.now()}`, role: "assistant", text: planText },
+              { id: `a-${Date.now()}`, role: "assistant", text: `Error generating edit: ${String(e)}` },
             ]);
+          } finally {
+            setStatusLine(null);
           }
         } else {
-          setPendingEdit(null);
-          const assistantMsg = `Opened ${resolvedPath}.`;
+          const assistantMsg =
+            targets.length > 1 ? `Opened: ${targets.join(", ")}` : `Opened: ${resolvedPath}`;
           setMessages((prev) => [
             ...prev,
             { id: `a-${Date.now()}`, role: "assistant", text: assistantMsg },
           ]);
+          setShowDiffPanel(true);
+          setFileEditState({
+            relativePath: resolvedPath,
+            baselineText: originalText,
+            baselineUpdatedAt: Date.now(),
+            originalText,
+            editedText: originalText,
+            dirty: false,
+            lastSaveStatus: "idle",
+          });
+          console.log("OPEN_EDITOR", { relativePath: resolvedPath, length: originalText.length });
         }
-        setShowDiffPanel(true);
-        setFileEditState({
-          relativePath: resolvedPath,
-          baselineText: originalText,
-          baselineUpdatedAt: Date.now(),
-          originalText,
-          editedText: originalText,
-          dirty: false,
-          lastSaveStatus: "idle",
-        });
-        console.log("OPEN_EDITOR", { relativePath: resolvedPath, length: originalText.length });
         console.log("DIFF_PANEL_VISIBLE", true);
         return;
       }
 
       // ROUTING: chat (no file action)
       console.log("MESSAGE_ROUTING: chat");
-      setStatusLine("Generating reply…");
+      setStatusLine("Generating replyâ€¦");
       try {
         const inspector = new ProjectInspector(workspace);
         const m = manifest ?? (await inspector.buildManifest());
@@ -613,7 +908,7 @@ export default function App() {
         setStatusLine(null);
       }
     },
-    [workspacePath, selectedPaths, manifest, useKnowledgePacks, projectSnapshot, enabledPacks, lastFileChoiceCandidates, fetchSessionsAndResume, pendingEdit]
+    [workspacePath, selectedPaths, manifest, useKnowledgePacks, projectSnapshot, enabledPacks, lastFileChoiceCandidates, fetchSessionsAndResume, pendingEdit, fileEditState]
   );
 
   const proposePatch = useCallback(
@@ -628,14 +923,14 @@ export default function App() {
       setReviewerOutput(null);
       const p = (prompt || "").trim() || "(no prompt)";
       setMessages((prev) => [...prev, { id: `u-${Date.now()}`, role: "user", text: p }]);
-      setStatusLine("Scanning selected files…");
+      setStatusLine("Scanning selected filesâ€¦");
       try {
         const inspector = new ProjectInspector(workspace);
         const m = manifest ?? (await inspector.buildManifest());
         if (!manifest) setManifest(m);
         const ctxBuilder = new ContextBuilder(workspace, m);
         const knowledgeStore = useKnowledgePacks ? new KnowledgeStore(root, workspace) : null;
-        setStatusLine("Generating patch…");
+        setStatusLine("Generating patchâ€¦");
         const ctx = await ctxBuilder.build(p, selectedPaths, {
           useKnowledge: useKnowledgePacks,
           knowledgeStore: knowledgeStore ?? undefined,
@@ -689,7 +984,7 @@ export default function App() {
       setViewingSessionId(null);
       const p = (prompt || "").trim() || "(no prompt)";
       setMessages((prev) => [...prev, { id: `u-${Date.now()}`, role: "user", text: p }]);
-        setStatusLine("Running pipeline…");
+        setStatusLine("Running pipelineâ€¦");
         try {
           const inspector = new ProjectInspector(workspace);
           const m = manifest ?? (await inspector.buildManifest());
@@ -770,10 +1065,10 @@ export default function App() {
         };
         await writeProjectSnapshot(root, snapshot).catch(() => {});
         setProjectSnapshot(snapshot);
-        await writeWorkspaceSettings(root, { autoPacksEnabled, enabledPacks: next, modelPath, port }).catch(() => {});
+        await writeWorkspaceSettings(root, { autoPacksEnabled, enabledPacks: next, devMode, modelPath, port }).catch(() => {});
       }
     },
-    [projectSnapshot, autoPacksEnabled, modelPath, port]
+    [projectSnapshot, autoPacksEnabled, devMode, modelPath, port]
   );
 
   const handleAutoPacksEnabledChange = useCallback(
@@ -781,10 +1076,21 @@ export default function App() {
       setAutoPacksEnabled(value);
       const root = workspace.root;
       if (root) {
-        writeWorkspaceSettings(root, { autoPacksEnabled: value, enabledPacks, modelPath, port }).catch(() => {});
+        writeWorkspaceSettings(root, { autoPacksEnabled: value, enabledPacks, devMode, modelPath, port }).catch(() => {});
       }
     },
-    [enabledPacks, modelPath, port]
+    [enabledPacks, devMode, modelPath, port]
+  );
+
+  const handleDevModeChange = useCallback(
+    (mode: DevMode) => {
+      setDevMode(mode);
+      const root = workspace.root;
+      if (root) {
+        writeWorkspaceSettings(root, { autoPacksEnabled, enabledPacks, devMode: mode, modelPath, port }).catch(() => {});
+      }
+    },
+    [autoPacksEnabled, enabledPacks, modelPath, port]
   );
 
   const rescanModels = useCallback(async () => {
@@ -802,7 +1108,7 @@ export default function App() {
   const applyPatch = useCallback(async () => {
     if (!workspacePath || !workspace.root || !planAndPatch || !currentProposedSessionId) return;
     setApplyInProgress(true);
-    setStatusLine("Applying patch…");
+    setStatusLine("Applying patchâ€¦");
     try {
       const engine = new PatchEngine(workspace.root, (p) =>
         workspace.readFile(p)
@@ -848,7 +1154,7 @@ export default function App() {
     }
     if (appState === "patchApplied" && lastBeforeSnapshots?.length && workspace.root) {
       setApplyInProgress(true);
-      setStatusLine("Reverting…");
+      setStatusLine("Revertingâ€¦");
       try {
         const store = new MemoryStore(workspace.root);
         if (lastAppliedSessionId) await store.updateSessionStatus(lastAppliedSessionId, "reverted");
@@ -902,54 +1208,572 @@ export default function App() {
     await fetchSessionsAndResume();
   }, [workspacePath, planAndPatch, currentProposedSessionId, fetchSessionsAndResume]);
 
-  const applyPendingEdit = useCallback(async () => {
-    if (!workspace.root || !pendingEdit) return;
-    const { targetPath, instructions, originalContent } = pendingEdit;
-    const applied = applySimpleEdit(originalContent, instructions);
-    if (applied === null) {
-      setMessages((prev) => [
-        ...prev,
-        { id: `a-${Date.now()}`, role: "assistant", text: "Could not apply edit (pattern not matched)." },
-      ]);
-      setPendingEdit(null);
-      return;
-    }
-    try {
-      await workspace.writeFile(workspace.root, targetPath, applied);
-      setFileEditState((prev) =>
-        prev && prev.relativePath === targetPath
-          ? {
-              ...prev,
-              originalText: applied,
-              editedText: applied,
-              dirty: false,
-            }
-          : prev
+  const applyPendingEdit = useCallback(
+    async () => {
+      if (!workspace.root || !pendingEdit) return;
+      const changes: ApplySnapshotChange[] = [];
+      for (const f of pendingEdit.files) {
+        const existedBefore = await workspace.exists(f.path);
+        const previousContent = existedBefore
+          ? await workspace.readFile(f.path)
+          : "";
+        changes.push({
+          path: f.path,
+          existedBefore,
+          previousContent,
+          wasCreated: !existedBefore,
+        });
+      }
+      const appliedPaths: string[] = [];
+      for (const f of pendingEdit.files) {
+        try {
+          await workspace.writeFile(workspace.root, f.path, f.proposed);
+          appliedPaths.push(f.path);
+        } catch (e) {
+          setMessages((prev) => [
+            ...prev,
+            { id: `a-${Date.now()}`, role: "assistant", text: `Error applying to ${f.path}: ${String(e)}` },
+          ]);
+          return;
+        }
+      }
+      setLastApplySnapshot({
+        id: `snap-${Date.now()}`,
+        createdAt: Date.now(),
+        root: workspace.root,
+        changes,
+      });
+      setProposalStack((prev) =>
+        prev.map((e) => (e.id === activeProposalId ? { ...e, status: "applied" as const } : e))
       );
-      setPendingEdit(null);
+      setActiveProposalId(null);
+      setFileEditState(null);
       console.log("plan: applied");
+      const appliedSummary = pendingEdit?.summary;
+      const appliedMsg =
+        appliedSummary != null
+          ? `Applied âœ“\n\n**${appliedSummary.title}**\n\nWhat changed:\n${appliedSummary.whatChanged.map((b) => `â€¢ ${b}`).join("\n")}\n\nBehavior after:\n${appliedSummary.behaviorAfter.map((b) => `â€¢ ${b}`).join("\n")}\n\nFiles: ${appliedSummary.files.map((f) => `${f.path}: ${f.change}`).join("; ")}${appliedSummary.risks?.length ? `\n\nRisks: ${appliedSummary.risks.map((b) => `â€¢ ${b}`).join("\n")}` : ""}`
+          : appliedPaths.length > 1
+            ? `Applied changes to: ${appliedPaths.join(", ")}`
+            : `Applied changes to: ${appliedPaths[0]}`;
       setMessages((prev) => [
         ...prev,
-        { id: `a-${Date.now()}`, role: "assistant", text: `Applied changes to ${targetPath}.` },
+        { id: `a-${Date.now()}`, role: "assistant", text: appliedMsg },
       ]);
+      if (devMode === "safe") {
+        setStatusLine("Checking prerequisitesâ€¦");
+        const checkFile = (path: string) => workspace.exists(path);
+        const readFileForProfile = (path: string) => workspace.readFile(path);
+        const profile = await pickVerifyProfileFromSignals(checkFile, readFileForProfile);
+        const runCmd = async (cmd: string) => {
+          const r = await workspace.runSystemCommand(cmd);
+          return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr };
+        };
+        const missing = await detectMissingPrereqs({
+          profile,
+          runCommand: runCmd,
+          workspaceRoot: workspace.root ?? undefined,
+          checkFileExists: checkFile,
+          detectedTypes: projectSnapshot?.detectedTypes ?? [],
+        });
+        setMissingPrereqs(missing);
+        await checkRecommendations();
+        if (missing.length > 0) {
+          setMessages((prev) => [
+            ...prev,
+            { id: `a-${Date.now()}`, role: "assistant", text: "Prerequisites missing. Install them before verification runs." },
+          ]);
+          setStatusLine(null);
+          return;
+        }
+        setStatusLine("Running verificationâ€¦");
+        try {
+          let cmds = projectSnapshot?.detectedCommands ?? {};
+          if (!cmds.typecheck && !cmds.lint) {
+            const detector = new ProjectDetector(workspace);
+            const detected = await detector.detect();
+            cmds = detected.detectedCommands;
+          }
+          const res = await runVerificationChecks({
+            workspaceRoot: workspace.root!,
+            commands: cmds as import("./core/types").DetectedCommands,
+            runTests: false,
+            runCommand: (root, cmd) => workspace.runCommand(root, cmd),
+          });
+          setVerificationResults(res);
+          if (!res.allPassed) {
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `a-${Date.now()}`,
+                role: "assistant",
+                text: `Verification failed at ${res.stages[res.failedStageIndex!]?.name ?? "?"}. Use Revert or Auto-fix.`,
+              },
+            ]);
+          } else {
+            setMessages((prev) => [
+              ...prev,
+              { id: `a-${Date.now()}`, role: "assistant", text: "Verification passed." },
+            ]);
+          }
+        } catch (e) {
+          setVerificationResults(null);
+          setMessages((prev) => [
+            ...prev,
+            { id: `a-${Date.now()}`, role: "assistant", text: `Verification error: ${String(e)}` },
+          ]);
+        } finally {
+          setStatusLine(null);
+        }
+      } else {
+        setVerificationResults(null);
+      }
+    },
+    [pendingEdit, projectSnapshot, devMode, checkRecommendations, activeProposalId]
+  );
+
+  const autoFixVerification = useCallback(
+    async () => {
+      if (!workspace.root || !lastApplySnapshot || !verificationResults || verificationResults.allPassed)
+        return;
+      const failed = verificationResults.stages[verificationResults.failedStageIndex!];
+      if (!failed) return;
+      const touchedPaths = lastApplySnapshot.changes.map((c) => c.path);
+      const fixPrompt = `Fix the following ${failed.name} errors. Only modify the reported issues.\n\nSTDERR:\n${failed.stderr}\n\nSTDOUT:\n${failed.stdout}\n\nFiles that were changed: ${touchedPaths.join(", ")}`;
+      setStatusLine("Auto-fix: generating patchâ€¦");
+      try {
+        const inspector = new ProjectInspector(workspace);
+        const m = manifest ?? (await inspector.buildManifest());
+        if (!manifest) setManifest(m);
+        const ctxBuilder = new ContextBuilder(workspace, m!);
+        const knowledgeStore = useKnowledgePacks ? new KnowledgeStore(workspace.root!, workspace) : null;
+        const ctx = await ctxBuilder.build(fixPrompt, touchedPaths, {
+          useKnowledge: useKnowledgePacks,
+          knowledgeStore: knowledgeStore ?? undefined,
+          agentRole: "coder",
+          projectSnapshot: projectSnapshot ?? undefined,
+          enabledPacks: enabledPacks.length ? enabledPacks : undefined,
+        });
+        const patchResult = await generatePlanAndPatch(ctx);
+        const engine = new PatchEngine(workspace.root!, (p) => workspace.readFile(p));
+        await engine.apply(patchResult.patch);
+        setMessages((prev) => [
+          ...prev,
+          { id: `a-${Date.now()}`, role: "assistant", text: "Auto-fix applied. Re-running verificationâ€¦" },
+        ]);
+        const cmds = projectSnapshot?.detectedCommands ?? {};
+        const res = await runVerificationChecks({
+          workspaceRoot: workspace.root!,
+          commands: cmds as import("./core/types").DetectedCommands,
+          runTests: false,
+          runCommand: (root, cmd) => workspace.runCommand(root, cmd),
+        });
+        setVerificationResults(res);
+        if (res.allPassed) {
+          setLastApplySnapshot(null);
+          setMessages((prev) => [
+            ...prev,
+            { id: `a-${Date.now()}`, role: "assistant", text: "Verification passed after auto-fix." },
+          ]);
+        } else {
+          setMessages((prev) => [
+            ...prev,
+            { id: `a-${Date.now()}`, role: "assistant", text: "Auto-fix applied but verification still failing. Try manual fix or Revert." },
+          ]);
+        }
+      } catch (e) {
+        setMessages((prev) => [
+          ...prev,
+          { id: `a-${Date.now()}`, role: "assistant", text: `Auto-fix error: ${String(e)}` },
+        ]);
+      } finally {
+        setStatusLine(null);
+      }
+    },
+    [lastApplySnapshot, verificationResults, manifest, useKnowledgePacks, projectSnapshot, enabledPacks]
+  );
+
+  const checkPrereqs = useCallback(async (): Promise<MissingPrereqResult[]> => {
+    const types = projectSnapshot?.detectedTypes ?? ["Node/TS"];
+    const profile = getVerifyProfile(types);
+    const runCmd = async (cmd: string) => {
+      const r = await workspace.runSystemCommand(cmd);
+      return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr };
+    };
+    const checkFile = workspace.root ? (path: string) => workspace.exists(path) : undefined;
+    const missing = await detectMissingPrereqs({
+      profile,
+      runCommand: runCmd,
+      workspaceRoot: workspace.root ?? undefined,
+      checkFileExists: checkFile,
+      detectedTypes: types,
+    });
+    setMissingPrereqs(missing);
+    return missing;
+  }, [projectSnapshot?.detectedTypes]);
+
+  async function checkRecommendations() {
+    if (!workspace.root) return;
+    
+    const runCmd = async (cmd: string) => {
+      const r = await workspace.runSystemCommand(cmd);
+      return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr };
+    };
+    const checkFile = (path: string) => workspace.exists(path);
+    const readFile = (path: string) => workspace.readFile(path);
+
+    try {
+      // Get recommendations based on project signals
+      const result = await getRecommendations(workspace.root, checkFile, readFile);
+      
+      // Extract prereqs and build reasoning map
+      const prereqs = result.recommended.map((r) => r.prereq);
+      const reasoning: Record<string, string> = {};
+      for (const r of result.recommended) {
+        reasoning[r.prereq.id] = r.reason;
+      }
+      
+      // Check status of each recommendation
+      const statusResults = await checkRecommendedPrereqs(prereqs, runCmd);
+      
+      setRecommendedPrereqs(statusResults);
+      setRecommendedReasoning(reasoning);
     } catch (e) {
-      setMessages((prev) => [
-        ...prev,
-        { id: `a-${Date.now()}`, role: "assistant", text: `Error applying: ${String(e)}` },
-      ]);
+      console.error("Failed to check recommendations:", e);
+      setRecommendedPrereqs([]);
+      setRecommendedReasoning({});
     }
-  }, [pendingEdit]);
+  }
+
+  const runInstallScript = useCallback(
+    async (prereqId: string) => {
+      const p = getPrereqById(prereqId);
+      if (!p?.installCommandPowerShell) return;
+      setInstallInProgress(true);
+      setInstallLog(null);
+      try {
+        const r = await workspace.runSystemCommand(p.installCommandPowerShell);
+        const log = `stdout:\n${r.stdout}\n\nstderr:\n${r.stderr}\n\nexit code: ${r.exitCode}`;
+        setInstallLog(log);
+        if (r.exitCode === 0) {
+          const missing = await checkPrereqs();
+          await checkRecommendations();
+          if (missing.length === 0) {
+            setMessages((prev) => [
+              ...prev,
+              { id: `a-${Date.now()}`, role: "assistant", text: `Installed ${p.displayName}. All prerequisites met.` },
+            ]);
+          }
+        }
+      } catch (e) {
+        setInstallLog(`Error: ${String(e)}`);
+      } finally {
+        setInstallInProgress(false);
+      }
+  },
+  [workspace, checkPrereqs, checkRecommendations]
+  );
+
+  const handleCopyPrereqCommand = useCallback((p: Prereq) => {
+    if (p.installCommandPowerShell) {
+      navigator.clipboard.writeText(p.installCommandPowerShell);
+    }
+  }, []);
+
+  const handleOpenPrereqLink = useCallback((p: Prereq) => {
+    if (p.installUrl) openUrl(p.installUrl);
+  }, []);
+
+  const handleInstallAllSafe = useCallback(async () => {
+    // Only include non-blocked winget items
+    let wingetOnly = missingPrereqs.filter(
+      (r) => r.prereq.installMethod === "winget" && r.prereq.installCommandPowerShell && !r.blockedBy
+    );
+    
+    // Include recommendations if toggle is on (exclude blocked)
+    if (includeRecommendations) {
+      const wingetRecommendations = recommendedPrereqs.filter(
+        (r) => r.status === "missing" && r.prereq.installMethod === "winget" && r.prereq.installCommandPowerShell && !r.blockedBy
+      );
+      wingetOnly = [...wingetOnly, ...wingetRecommendations];
+    }
+    
+    for (const r of wingetOnly) {
+      await runInstallScript(r.prereq.id);
+    }
+  }, [missingPrereqs, recommendedPrereqs, includeRecommendations, runInstallScript]);
+
+  const handleInstallAllAdvanced = useCallback(async () => {
+    // Only include non-blocked items
+    let wingetOnly = missingPrereqs.filter(
+      (r) => r.prereq.installMethod === "winget" && r.prereq.installCommandPowerShell && !r.blockedBy
+    );
+    let chocoOnly = missingPrereqs.filter(
+      (r) => r.prereq.installMethod === "choco" && r.prereq.installCommandPowerShell && !r.blockedBy
+    );
+    
+    // Include recommendations if toggle is on (exclude blocked)
+    if (includeRecommendations) {
+      const wingetRecommendations = recommendedPrereqs.filter(
+        (r) => r.status === "missing" && r.prereq.installMethod === "winget" && r.prereq.installCommandPowerShell && !r.blockedBy
+      );
+      const chocoRecommendations = recommendedPrereqs.filter(
+        (r) => r.status === "missing" && r.prereq.installMethod === "choco" && r.prereq.installCommandPowerShell && !r.blockedBy
+      );
+      wingetOnly = [...wingetOnly, ...wingetRecommendations];
+      chocoOnly = [...chocoOnly, ...chocoRecommendations];
+    }
+    
+    if (chocoOnly.length > 0) {
+      const ok = window.confirm(
+        "This will run Chocolatey installs via PowerShell. Continue?"
+      );
+      if (!ok) return;
+    }
+    for (const r of wingetOnly) {
+      await runInstallScript(r.prereq.id);
+    }
+    for (const r of chocoOnly) {
+      await runInstallScript(r.prereq.id);
+    }
+  }, [missingPrereqs, recommendedPrereqs, includeRecommendations, runInstallScript]);
+
+  const handleRecheckPrereqs = useCallback(async () => {
+    setStatusLine("Checking prerequisitesâ€¦");
+    await checkPrereqs();
+    await checkRecommendations();
+    setStatusLine(null);
+  }, [checkPrereqs, checkRecommendations]);
+
+  const revertFromSnapshot = useCallback(async () => {
+    if (!workspace.root || !lastApplySnapshot) return;
+    const count = lastApplySnapshot.changes.length;
+    const ok = window.confirm(
+      `Revert last apply? This will restore ${count} file(s) to their previous state.`
+    );
+    if (!ok) return;
+
+    const revertLogs: string[] = [];
+    for (const c of lastApplySnapshot.changes) {
+      try {
+        if (c.wasCreated) {
+          await workspace.deleteFile(workspace.root, c.path);
+        } else {
+          await workspace.writeFile(workspace.root, c.path, c.previousContent);
+        }
+        revertLogs.push(`Reverted: ${c.path}`);
+      } catch (e) {
+        setMessages((prev) => [
+          ...prev,
+          { id: `a-${Date.now()}`, role: "assistant", text: `Revert error for ${c.path}: ${String(e)}` },
+        ]);
+        return;
+      }
+    }
+    const revertLog = revertLogs.join("\n");
+    setInstallLog((prev) => (prev ? prev + "\n\n" + revertLog : revertLog));
+    setLastApplySnapshot(null);
+    setVerificationResults(null);
+    setMessages((prev) => [
+      ...prev,
+      { id: `a-${Date.now()}`, role: "assistant", text: "Reverted. All files restored to pre-apply state." },
+    ]);
+  }, [lastApplySnapshot]);
 
   const cancelPendingEdit = useCallback(() => {
-    if (pendingEdit) {
-      setPendingEdit(null);
-      console.log("plan: canceled");
-      setMessages((prev) => [
-        ...prev,
-        { id: `a-${Date.now()}`, role: "assistant", text: "Canceled. No changes applied." },
-      ]);
+    if (!activeProposalId || !pendingEdit) return;
+    setProposalStack((prev) => prev.filter((e) => e.id !== activeProposalId));
+    setActiveProposalId(null);
+    setFileEditState(null);
+    console.log("plan: canceled");
+    setMessages((prev) => [
+      ...prev,
+      { id: `a-${Date.now()}`, role: "assistant", text: "Canceled. No changes applied." },
+    ]);
+  }, [activeProposalId, pendingEdit]);
+
+  const cancelMultiFileProposal = useCallback(() => {
+    if (!activeProposalId || !multiFileProposal) return;
+    setProposalStack((prev) => prev.filter((e) => e.id !== activeProposalId));
+    setActiveProposalId(null);
+    setFileEditState(null);
+    console.log("multi-file proposal: canceled");
+    setMessages((prev) => [
+      ...prev,
+      { id: `a-${Date.now()}`, role: "assistant", text: "Canceled. No changes applied." },
+    ]);
+  }, [activeProposalId, multiFileProposal]);
+
+  const setActiveProposalForReview = useCallback((id: string) => {
+    setActiveProposalId(id);
+    setShowDiffPanel(true);
+  }, []);
+
+  const discardProposalFromStack = useCallback((id: string) => {
+    setProposalStack((prev) => prev.filter((e) => e.id !== id));
+    setActiveProposalId((current) => (current === id ? null : current));
+    if (activeProposalId === id) setFileEditState(null);
+  }, [activeProposalId]);
+
+  const toggleIncludedFile = useCallback(
+    (path: string) => {
+      if (!activeProposalId) return;
+      setProposalStack((prev) =>
+        prev.map((e) =>
+          e.id === activeProposalId
+            ? { ...e, includedFilePaths: { ...(e.includedFilePaths ?? {}), [path]: !(e.includedFilePaths ?? {})[path] } }
+            : e
+        )
+      );
+    },
+    [activeProposalId]
+  );
+
+  const applyMultiFileProposalSelected = useCallback(async () => {
+    if (!workspace.root || !multiFileProposal) return;
+    const toApply = multiFileProposal.files.filter((f) => includedFilePaths[f.path] !== false);
+    if (toApply.length === 0) return;
+
+    const emptyExisting = toApply.filter((f) => f.exists && f.proposedContent === "");
+    if (emptyExisting.length > 0) {
+      const ok = window.confirm(
+        `The following file(s) would be erased:\n${emptyExisting.map((f) => f.path).join("\n")}\n\nContinue?`
+      );
+      if (!ok) return;
     }
-  }, [pendingEdit]);
+
+    const changes: ApplySnapshotChange[] = [];
+    for (const f of toApply) {
+      const existedBefore = await workspace.exists(f.path);
+      const previousContent = existedBefore
+        ? await workspace.readFile(f.path)
+        : "";
+      changes.push({
+        path: f.path,
+        existedBefore,
+        previousContent,
+        wasCreated: !existedBefore,
+      });
+    }
+
+    const logs: string[] = [];
+    for (const f of toApply) {
+      try {
+        await workspace.writeFile(workspace.root, f.path, f.proposedContent);
+        logs.push(`Applied: ${f.path}`);
+      } catch (e) {
+        setMessages((prev) => [
+          ...prev,
+          { id: `a-${Date.now()}`, role: "assistant", text: `Error applying ${f.path}: ${String(e)}` },
+        ]);
+        return;
+      }
+    }
+    setLastApplySnapshot({
+      id: `snap-${Date.now()}`,
+      createdAt: Date.now(),
+      root: workspace.root,
+      changes,
+    });
+    setProposalStack((prev) =>
+      prev.map((e) => (e.id === activeProposalId ? { ...e, status: "applied" as const } : e))
+    );
+    const multiAppliedSummary = multiFileProposal?.summary;
+    const multiAppliedMsg =
+      multiAppliedSummary != null
+        ? `Applied âœ“\n\n**${multiAppliedSummary.title}**\n\nWhat changed:\n${multiAppliedSummary.whatChanged.map((b) => `â€¢ ${b}`).join("\n")}\n\nBehavior after:\n${multiAppliedSummary.behaviorAfter.map((b) => `â€¢ ${b}`).join("\n")}\n\nFiles: ${multiAppliedSummary.files.map((f) => `${f.path}: ${f.change}`).join("; ")}${multiAppliedSummary.risks?.length ? `\n\nRisks: ${multiAppliedSummary.risks.map((b) => `â€¢ ${b}`).join("\n")}` : ""}`
+        : `Applied ${toApply.length} file(s): ${toApply.map((f) => f.path).join(", ")}`;
+    setActiveProposalId(null);
+    setFileEditState(null);
+    const applyLog = logs.join("\n");
+    setInstallLog((prev) => (prev ? prev + "\n\n" + applyLog : applyLog));
+    setMessages((prev) => [
+      ...prev,
+      { id: `a-${Date.now()}`, role: "assistant", text: multiAppliedMsg },
+    ]);
+    if (devMode === "safe") {
+      setStatusLine("Checking prerequisitesâ€¦");
+      const checkFile = (path: string) => workspace.exists(path);
+      const readFileForProfile = (path: string) => workspace.readFile(path);
+      const profile = await pickVerifyProfileFromSignals(checkFile, readFileForProfile);
+      const runCmd = async (cmd: string) => {
+        const r = await workspace.runSystemCommand(cmd);
+        return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr };
+      };
+      const missing = await detectMissingPrereqs({
+        profile,
+        runCommand: runCmd,
+        workspaceRoot: workspace.root ?? undefined,
+        checkFileExists: checkFile,
+        detectedTypes: projectSnapshot?.detectedTypes ?? [],
+      });
+      setMissingPrereqs(missing);
+      await checkRecommendations();
+      if (missing.length > 0) {
+        setMessages((prev) => [
+          ...prev,
+          { id: `a-${Date.now()}`, role: "assistant", text: "Prerequisites missing. Install them before verification runs." },
+        ]);
+        setStatusLine(null);
+        return;
+      }
+      setStatusLine("Running verificationâ€¦");
+      try {
+        let cmds = projectSnapshot?.detectedCommands ?? {};
+        if (!cmds.typecheck && !cmds.lint) {
+          const detector = new ProjectDetector(workspace);
+          const detected = await detector.detect();
+          cmds = detected.detectedCommands;
+        }
+        const res = await runVerificationChecks({
+          workspaceRoot: workspace.root!,
+          commands: cmds as import("./core/types").DetectedCommands,
+          runTests: false,
+          runCommand: (root, cmd) => workspace.runCommand(root, cmd),
+        });
+        setVerificationResults(res);
+        if (!res.allPassed) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `a-${Date.now()}`,
+              role: "assistant",
+              text: `Verification failed at ${res.stages[res.failedStageIndex!]?.name ?? "?"}. Use Revert or Auto-fix.`,
+            },
+          ]);
+        } else {
+          setMessages((prev) => [
+            ...prev,
+            { id: `a-${Date.now()}`, role: "assistant", text: "Verification passed." },
+          ]);
+        }
+      } catch (e) {
+        setVerificationResults(null);
+        setMessages((prev) => [
+          ...prev,
+          { id: `a-${Date.now()}`, role: "assistant", text: `Verification error: ${String(e)}` },
+        ]);
+      } finally {
+        setStatusLine(null);
+      }
+    } else {
+      setVerificationResults(null);
+    }
+  }, [workspace.root, multiFileProposal, includedFilePaths, devMode, projectSnapshot, checkRecommendations, activeProposalId]);
+
+  const selectPendingFile = useCallback(
+    (index: number) => {
+      if (!activeProposalId) return;
+      setProposalStack((prev) =>
+        prev.map((e) =>
+          e.id === activeProposalId && e.pendingEdit
+            ? { ...e, pendingEdit: { ...e.pendingEdit, selectedIndex: index } }
+            : e
+        )
+      );
+    },
+    [activeProposalId]
+  );
 
   const toggleViewDiff = useCallback(() => {
     setShowDiffPanel((v) => {
@@ -1036,7 +1860,7 @@ export default function App() {
   }, [fileEditState]);
 
   const runChecks = useCallback(() => {
-    setStatusLine("Running checks…");
+    setStatusLine("Running checksâ€¦");
     setTimeout(() => setStatusLine(null), 800);
     /* TODO: TaskRunner; Sprint 3 */
   }, []);
@@ -1065,7 +1889,7 @@ export default function App() {
     async (s: SessionRecord) => {
       if (!workspace.root || s.status !== "pending") return;
       setApplyInProgress(true);
-      setStatusLine("Applying patch…");
+      setStatusLine("Applying patchâ€¦");
       try {
         const engine = new PatchEngine(workspace.root, (p) =>
           workspace.readFile(p)
@@ -1095,7 +1919,7 @@ export default function App() {
       const snapshots = s.beforeSnapshots;
       if (!snapshots?.length) return;
       setApplyInProgress(true);
-      setStatusLine("Reverting…");
+      setStatusLine("Revertingâ€¦");
       try {
         const engine = new PatchEngine(workspace.root, (p) =>
           workspace.readFile(p)
@@ -1186,6 +2010,35 @@ export default function App() {
           pendingEdit={pendingEdit}
           onApplyPendingEdit={applyPendingEdit}
           onCancelPendingEdit={cancelPendingEdit}
+          multiFileProposal={multiFileProposal}
+          includedFilePaths={includedFilePaths}
+          onToggleIncludedFile={toggleIncludedFile}
+          onApplyMultiFileSelected={applyMultiFileProposalSelected}
+          onCancelMultiFileProposal={cancelMultiFileProposal}
+          verificationResults={verificationResults}
+          lastApplySnapshot={lastApplySnapshot}
+          onRevertFromSnapshot={revertFromSnapshot}
+          onAutoFixVerification={autoFixVerification}
+          missingPrereqs={missingPrereqs}
+          recommendedPrereqs={recommendedPrereqs}
+          recommendedReasoning={recommendedReasoning}
+          installLog={installLog}
+          installInProgress={installInProgress}
+          includeRecommendations={includeRecommendations}
+          onIncludeRecommendationsChange={setIncludeRecommendations}
+          onCopyPrereqCommand={handleCopyPrereqCommand}
+          onInstallPrereq={runInstallScript}
+          onOpenPrereqLink={handleOpenPrereqLink}
+          onInstallAllSafe={handleInstallAllSafe}
+          onInstallAllAdvanced={handleInstallAllAdvanced}
+          onRecheckPrereqs={handleRecheckPrereqs}
+          devMode={devMode}
+          onDevModeChange={handleDevModeChange}
+          proposalStack={proposalStack}
+          activeProposalId={activeProposalId}
+          activeProposalStatus={activeEntry?.status ?? null}
+          onReviewProposal={setActiveProposalForReview}
+          onDiscardProposal={discardProposalFromStack}
         />
         <FilesPane
           fileTree={fileTree}
@@ -1210,8 +2063,23 @@ export default function App() {
           onFileEditSave={handleFileEditSave}
           onSetBaseline={handleSetBaseline}
           onResetToBaseline={handleResetToBaseline}
+          pendingEdit={pendingEdit}
+          onSelectPendingFile={selectPendingFile}
+          multiFileProposal={multiFileProposal}
+          includedFilePaths={includedFilePaths}
+          onToggleIncludedFile={toggleIncludedFile}
+          selectedMultiFileIndex={selectedMultiFileIndex}
+          onSelectMultiFileIndex={setSelectedMultiFileIndex}
+          onApplyMultiFileSelected={applyMultiFileProposalSelected}
+          onCancelMultiFileProposal={cancelMultiFileProposal}
         />
       </div>
     </div>
   );
 }
+
+
+
+
+
+
