@@ -26,6 +26,7 @@ export interface DetectedCommands {
   test?: string;
   lint?: string;
   dev?: string;
+  typecheck?: string;
 }
 
 /** Project snapshot stored at .devassistant/project_snapshot.json */
@@ -39,10 +40,15 @@ export interface ProjectSnapshot {
   generatedAt?: string;
 }
 
+/** Dev mode: Fast = no verify after apply, Safe = verify after apply. */
+export type DevMode = "fast" | "safe";
+
 /** Workspace settings stored at .devassistant/settings.json */
 export interface WorkspaceSettings {
   autoPacksEnabled: boolean;
   enabledPacks: string[];
+  /** Fast Dev (default) or Safe Dev (verify after apply). */
+  devMode?: DevMode;
   /** ToolRoot-relative path to GGUF (e.g. models/foo.gguf) for provider=local. */
   modelPath?: string;
   /** Port for llama-server (default 11435). */
@@ -71,6 +77,20 @@ export interface KnowledgeChunkRef {
 export interface PlanAndPatch {
   explanation: string;
   patch: string;
+}
+
+/** Confidence of grounded summary after validation. */
+export type SummaryConfidence = "high" | "medium" | "low";
+
+/** Human-readable change summary for a proposal (single or multi). */
+export interface ChangeSummary {
+  title: string;
+  whatChanged: string[];
+  behaviorAfter: string[];
+  files: Array<{ path: string; change: string }>;
+  risks?: string[];
+  /** Set by validator: high = most bullets unchanged, medium = some rewrites, low = heavy cleanup or fallback. */
+  confidence?: SummaryConfidence;
 }
 
 /** Planner agent output. NO patch. */

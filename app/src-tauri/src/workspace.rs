@@ -5,6 +5,29 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+
+fn global_tool_root_path() -> Result<PathBuf, String> {
+  let local = std::env::var("LOCALAPPDATA").map_err(|_| "LOCALAPPDATA is not set".to_string())?;
+  Ok(std::path::PathBuf::from(local).join("DevAssistantCursorLite").join("tools"))
+}
+
+#[tauri::command]
+pub fn get_global_tool_root() -> Result<String, String> {
+  let tool_root = global_tool_root_path()?;
+  Ok(tool_root.to_string_lossy().to_string())
+}
+
+/// Create runtime/llama and models under global tool root. Returns the global tool root path.
+#[tauri::command]
+pub fn ensure_global_tool_dirs() -> Result<String, String> {
+  let root = global_tool_root_path()?;
+  let runtime_llama = root.join("runtime").join("llama");
+  let models = root.join("models");
+  std::fs::create_dir_all(&runtime_llama).map_err(|e| e.to_string())?;
+  std::fs::create_dir_all(&models).map_err(|e| e.to_string())?;
+  Ok(root.to_string_lossy().to_string())
+}
+
 fn normalize_rel(s: &str) -> PathBuf {
     let p = Path::new(s);
     let mut out = PathBuf::new();
@@ -395,3 +418,4 @@ pub fn workspace_walk_snapshot(
         top_level,
     })
 }
+

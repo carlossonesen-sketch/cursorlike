@@ -45,6 +45,8 @@ interface ConversationPaneProps {
   provider: Provider;
   onProviderChange: (value: Provider) => void;
   toolRoot: string | null;
+  hasLlamaAtToolRoot: boolean;
+  onInitializeTools: () => Promise<void>;
   localSettings: LocalModelSettings;
   onLocalSettingsChange: (value: LocalModelSettings) => void;
   onRescanModels: () => void;
@@ -60,6 +62,35 @@ interface ConversationPaneProps {
   pendingEdit: import("../App").PendingEdit | null;
   onApplyPendingEdit: () => void;
   onCancelPendingEdit: () => void;
+  multiFileProposal: import("../core").MultiFileProposal | null;
+  includedFilePaths: Record<string, boolean>;
+  onToggleIncludedFile: (path: string) => void;
+  onApplyMultiFileSelected: () => void;
+  onCancelMultiFileProposal: () => void;
+  verificationResults: import("../core").VerificationResult | null;
+  lastApplySnapshot: import("../App").ApplySnapshot | null;
+  onRevertFromSnapshot: () => void;
+  onAutoFixVerification: () => void;
+  missingPrereqs: import("../core").MissingPrereqResult[];
+  recommendedPrereqs: import("../core").RecommendedPrereqResult[];
+  recommendedReasoning: Record<string, string>;
+  installLog: string | null;
+  installInProgress: boolean;
+  includeRecommendations: boolean;
+  onIncludeRecommendationsChange: (include: boolean) => void;
+  onCopyPrereqCommand: (p: import("../core").Prereq) => void;
+  onInstallPrereq: (prereqId: string) => void;
+  onOpenPrereqLink: (p: import("../core").Prereq) => void;
+  onInstallAllSafe: () => void;
+  onInstallAllAdvanced: () => void;
+  onRecheckPrereqs: () => void;
+  devMode: import("../core/types").DevMode;
+  onDevModeChange: (mode: import("../core/types").DevMode) => void;
+  proposalStack: import("../App").ProposalEntry[];
+  activeProposalId: string | null;
+  activeProposalStatus: "proposed" | "pending" | "applied" | "reverted" | "discarded" | null;
+  onReviewProposal: (id: string) => void;
+  onDiscardProposal: (id: string) => void;
 }
 
 export function ConversationPane({
@@ -88,6 +119,8 @@ export function ConversationPane({
   provider,
   onProviderChange,
   toolRoot,
+  hasLlamaAtToolRoot,
+  onInitializeTools,
   localSettings,
   onLocalSettingsChange,
   onRescanModels,
@@ -103,7 +136,36 @@ export function ConversationPane({
   pendingEdit,
   onApplyPendingEdit,
   onCancelPendingEdit,
+  multiFileProposal,
+  includedFilePaths,
+  onToggleIncludedFile,
+  onApplyMultiFileSelected,
+  onCancelMultiFileProposal,
+  verificationResults,
+  lastApplySnapshot,
+  onRevertFromSnapshot,
+  onAutoFixVerification,
+  missingPrereqs,
+  recommendedPrereqs,
+  recommendedReasoning,
+  installLog,
+  installInProgress,
+  includeRecommendations,
+  onIncludeRecommendationsChange,
+  onCopyPrereqCommand,
+  onInstallPrereq,
+  onOpenPrereqLink,
+  onInstallAllSafe,
+  onRecheckPrereqs,
+  devMode,
+  onDevModeChange,
+  proposalStack,
+  activeProposalId,
+  activeProposalStatus,
+  onReviewProposal,
+  onDiscardProposal,
 }: ConversationPaneProps) {
+  const canApplyActive = activeProposalStatus === "pending";
   const [prompt, setPrompt] = useState("");
   const [knowledgeExpanded, setKnowledgeExpanded] = useState(false);
   const [expandedChunkIndices, setExpandedChunkIndices] = useState<Set<number>>(new Set());
@@ -171,6 +233,32 @@ export function ConversationPane({
           <RuntimeStatusPanel workspaceRoot={workspaceRoot} />
         </div>
       )}
+      {proposalStack.length > 0 && (
+        <div className="proposal-stack-panel">
+          <strong>Proposal Stack</strong>
+          <ul className="proposal-stack-list">
+            {[...proposalStack].sort((a, b) => b.createdAt - a.createdAt).map((entry) => (
+              <li
+                key={entry.id}
+                className={entry.id === activeProposalId ? "proposal-stack-item active" : "proposal-stack-item"}
+              >
+                <span className="proposal-stack-label">
+                  {entry.type === "single" ? "Single" : "Multi"} — {entry.fileCount} file(s)
+                </span>
+                <span className={`proposal-stack-badge status-${entry.status}`}>{entry.status}</span>
+                <div className="proposal-stack-actions">
+                  <button type="button" className="btn small" onClick={() => onReviewProposal(entry.id)}>
+                    Review
+                  </button>
+                  <button type="button" className="btn small" onClick={() => onDiscardProposal(entry.id)}>
+                    Discard
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       <div className="conversation-stream" ref={scrollRef}>
         {resume && messages.length === 0 && !planAndPatch && (
           <div className="resume-block message assistant">
@@ -215,13 +303,154 @@ export function ConversationPane({
         {pendingEdit && (
           <div className="message assistant">
             <strong>Edit plan</strong>
-            <pre className="plan-text">{pendingEdit.planText}</pre>
+            <p className="muted">
+              {pendingEdit.files.length} file(s). Review diff in panel, then Apply or Cancel.
+            </p>
+            {pendingEdit.summary && (
+              <div className="change-summary">
+                <span className="change-summary-badge">
+                  Summary (grounded){pendingEdit.summary.confidence ? ` — Confidence: ${pendingEdit.summary.confidence.charAt(0).toUpperCase() + pendingEdit.summary.confidence.slice(1)}` : " in proposed changes"}
+                </span>
+                <strong className="change-summary-title">{pendingEdit.summary.title}</strong>
+                <div className="change-summary-section">
+                  <span className="change-summary-label">What changed:</span>
+                  <ul>{pendingEdit.summary.whatChanged.map((b, i) => <li key={i}>{b}</li>)}</ul>
+                </div>
+                <div className="change-summary-section">
+                  <span className="change-summary-label">Behavior after:</span>
+                  <ul>{pendingEdit.summary.behaviorAfter.map((b, i) => <li key={i}>{b}</li>)}</ul>
+                </div>
+                <div className="change-summary-files">
+                  {pendingEdit.summary.files.map((f, i) => (
+                    <div key={i} className="change-summary-file"><code>{f.path}</code>: {f.change}</div>
+                  ))}
+                </div>
+                {pendingEdit.summary.risks?.length ? (
+                  <div className="change-summary-section">
+                    <span className="change-summary-label">Risks:</span>
+                    <ul>{pendingEdit.summary.risks.map((b, i) => <li key={i}>{b}</li>)}</ul>
+                  </div>
+                ) : null}
+              </div>
+            )}
             <div className="plan-actions">
               <button type="button" className="btn primary" onClick={onApplyPendingEdit}>
                 Apply
               </button>
               <button type="button" className="btn" onClick={onCancelPendingEdit}>
                 Cancel
+              </button>
+            </div>
+          </div>
+        )}
+        {multiFileProposal && (
+          <div className="message assistant">
+            <strong>Multi-file proposal</strong>
+            <p className="muted">
+              {multiFileProposal.files.length} file(s). Review in panel, select files to include, then Apply Selected.
+            </p>
+            {multiFileProposal.summary ? (
+              <div className="change-summary">
+                <span className="change-summary-badge">
+                  Summary (grounded){multiFileProposal.summary.confidence ? ` — Confidence: ${multiFileProposal.summary.confidence.charAt(0).toUpperCase() + multiFileProposal.summary.confidence.slice(1)}` : " in proposed changes"}
+                </span>
+                <strong className="change-summary-title">{multiFileProposal.summary.title}</strong>
+                <div className="change-summary-section">
+                  <span className="change-summary-label">What changed:</span>
+                  <ul>{multiFileProposal.summary.whatChanged.map((b, i) => <li key={i}>{b}</li>)}</ul>
+                </div>
+                <div className="change-summary-section">
+                  <span className="change-summary-label">Behavior after:</span>
+                  <ul>{multiFileProposal.summary.behaviorAfter.map((b, i) => <li key={i}>{b}</li>)}</ul>
+                </div>
+                <div className="change-summary-files">
+                  {multiFileProposal.summary.files.map((f, i) => (
+                    <div key={i} className="change-summary-file"><code>{f.path}</code>: {f.change}</div>
+                  ))}
+                </div>
+                {multiFileProposal.summary.risks?.length ? (
+                  <div className="change-summary-section">
+                    <span className="change-summary-label">Risks:</span>
+                    <ul>{multiFileProposal.summary.risks.map((b, i) => <li key={i}>{b}</li>)}</ul>
+                  </div>
+                ) : null}
+              </div>
+            ) : multiFileProposal.plan.length > 0 ? (
+              <ul className="proposal-plan">
+                {multiFileProposal.plan.map((bullet, i) => (
+                  <li key={i}>{bullet}</li>
+                ))}
+              </ul>
+            ) : null}
+            <div className="plan-actions">
+              <button
+                type="button"
+                className="btn primary"
+                onClick={onApplyMultiFileSelected}
+                disabled={!canApplyActive || multiFileProposal.files.filter((f) => includedFilePaths[f.path] !== false).length === 0}
+              >
+                Apply Selected
+              </button>
+              <button type="button" className="btn" onClick={onCancelMultiFileProposal} disabled={!canApplyActive}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+        {(missingPrereqs.length > 0 || recommendedPrereqs.length > 0) && (
+          <PrerequisitesPanel
+            missingPrereqs={missingPrereqs}
+            recommendedPrereqs={recommendedPrereqs}
+            recommendedReasoning={recommendedReasoning}
+            installLog={installLog}
+            installInProgress={installInProgress}
+            includeRecommendations={includeRecommendations}
+            onIncludeRecommendationsChange={onIncludeRecommendationsChange}
+            onCopyCommand={onCopyPrereqCommand}
+            onInstall={onInstallPrereq}
+            onOpenLink={onOpenPrereqLink}
+            onInstallAllSafe={onInstallAllSafe}
+            onInstallAllAdvanced={onInstallAllAdvanced}
+            onRecheck={onRecheckPrereqs}
+          />
+        )}
+        {verificationResults && (
+          <div className="message assistant verification-results">
+            <strong>Verification results</strong>
+            <div className="verification-stages">
+              {verificationResults.stages.map((s, i) => (
+                <details key={s.name} className={s.passed ? "passed" : "failed"}>
+                  <summary>
+                    {s.passed ? "✓" : "✗"} {s.name} ({s.command})
+                  </summary>
+                  <pre className="verification-log">
+                    {s.stdout || "(no stdout)"}
+                    {s.stderr ? `\n--- stderr ---\n${s.stderr}` : ""}
+                  </pre>
+                </details>
+              ))}
+            </div>
+            {!verificationResults.allPassed && lastApplySnapshot && (
+              <div className="plan-actions">
+                <button type="button" className="btn primary" onClick={onAutoFixVerification}>
+                  Auto-fix (max 3 attempts)
+                </button>
+                <button type="button" className="btn" onClick={onRevertFromSnapshot}>
+                  Revert last apply
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+        {lastApplySnapshot && (!verificationResults || verificationResults.allPassed) && (
+          <div className="message assistant">
+            <strong>Last apply</strong>
+            <p className="muted">
+              {lastApplySnapshot.changes.length} file(s) were changed. You can revert to restore the previous state.
+            </p>
+            <div className="plan-actions">
+              <button type="button" className="btn" onClick={onRevertFromSnapshot}>
+                Revert last apply
               </button>
             </div>
           </div>
@@ -293,12 +522,22 @@ export function ConversationPane({
         <div className="model-settings">
           {provider === "local" && (
             <>
-              {!toolRoot && workspaceRoot && (
-                <p className="local-error-msg">
-                  Could not find runtime/llama/llama-server.exe. Expected under toolRoot/runtime/llama.
-                </p>
+              {workspaceRoot && (!toolRoot || !hasLlamaAtToolRoot) && (
+                <div className="local-error-msg">
+                  <p>
+                    {!toolRoot
+                      ? "Could not find tools folder."
+                      : "Place llama-server.exe under toolRoot/runtime/llama to use the local model."}
+                  </p>
+                  <button type="button" className="btn primary" onClick={onInitializeTools}>
+                    Initialize Tools
+                  </button>
+                  <p className="local-init-hint">
+                    Creates folders under %LOCALAPPDATA%\DevAssistantCursorLite\tools. Then add llama-server.exe to runtime\llama and a .gguf to models.
+                  </p>
+                </div>
               )}
-              {toolRoot && !localSettings.ggufPath?.trim() && (
+              {toolRoot && hasLlamaAtToolRoot && !localSettings.ggufPath?.trim() && (
                 <p className="local-no-gguf-msg">
                   Drop a .gguf into <code>{toolRoot.replace(/\\/g, "/").replace(/\/+$/, "")}/models</code>
                 </p>
@@ -423,6 +662,27 @@ export function ConversationPane({
             </div>
           )}
         </div>
+        <div className="dev-mode-toggle">
+          <span className="dev-mode-label">Mode:</span>
+          <div className="dev-mode-buttons" role="group" aria-label="Dev mode">
+            <button
+              type="button"
+              className={devMode === "fast" ? "active" : ""}
+              onClick={() => onDevModeChange("fast")}
+              title="Apply without verification"
+            >
+              Fast Dev
+            </button>
+            <button
+              type="button"
+              className={devMode === "safe" ? "active" : ""}
+              onClick={() => onDevModeChange("safe")}
+              title="Verify automatically after Apply"
+            >
+              Safe Dev
+            </button>
+          </div>
+        </div>
         <label className="knowledge-toggle">
           <input
             type="checkbox"
@@ -449,7 +709,7 @@ export function ConversationPane({
         <button
           type="button"
           className="btn primary"
-          disabled={!workspaceRoot || (provider === "local" && (!toolRoot || !localSettings.ggufPath?.trim()))}
+          disabled={!workspaceRoot || (provider === "local" && (!toolRoot || !hasLlamaAtToolRoot || !localSettings.ggufPath?.trim()))}
           onClick={handleSendChat}
         >
           Send

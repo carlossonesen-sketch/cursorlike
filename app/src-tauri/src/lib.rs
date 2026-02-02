@@ -35,7 +35,10 @@ pub fn run() {
             runtime::runtime_status,
             runtime::runtime_stop,
             runtime::runtime_generate,
+            workspace::get_global_tool_root,
+            workspace::ensure_global_tool_dirs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+

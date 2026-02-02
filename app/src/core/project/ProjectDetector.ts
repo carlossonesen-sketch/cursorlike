@@ -45,9 +45,21 @@ const DEFAULT_COMMANDS: Record<string, Partial<DetectedCommands>> = {
   Flutter: { build: "flutter build", test: "flutter test", lint: "flutter analyze", dev: "flutter run" },
   "C/C++": { build: "make", test: "make test", lint: "", dev: "" },
   PowerShell: { build: "", test: "Invoke-Pester", lint: "Invoke-ScriptAnalyzer", dev: "" },
-  Tauri: { build: "npm run tauri build", test: "npm test", lint: "npm run lint", dev: "npm run tauri dev" },
+  Tauri: {
+    build: "npm run tauri build",
+    test: "npm test",
+    lint: "npm run lint",
+    dev: "npm run tauri dev",
+    typecheck: "npx tsc --noEmit",
+  },
   Firebase: { build: "", test: "", lint: "", dev: "firebase emulators:start" },
-  "Next.js": { build: "npm run build", test: "npm test", lint: "npm run lint", dev: "npm run dev" },
+  "Next.js": {
+    build: "npm run build",
+    test: "npm test",
+    lint: "npm run lint",
+    dev: "npm run dev",
+    typecheck: "npx tsc --noEmit",
+  },
 };
 
 function flattenPaths(nodes: FileTreeNode[]): string[] {
@@ -159,6 +171,7 @@ export class ProjectDetector {
         if (scripts.build) out.build = scripts.build;
         if (scripts.test) out.test = scripts.test;
         if (scripts.lint) out.lint = scripts.lint;
+        if (scripts.typecheck) out.typecheck = scripts.typecheck;
         out.dev = scripts.dev ?? scripts.start ?? out.dev;
       } catch {
         /* ignore */
@@ -171,6 +184,7 @@ export class ProjectDetector {
     if (!out.build && defaults.build) out.build = defaults.build;
     if (!out.test && defaults.test) out.test = defaults.test;
     if (!out.lint && defaults.lint) out.lint = defaults.lint;
+    if (!out.typecheck && defaults.typecheck) out.typecheck = defaults.typecheck;
     if (!out.dev && defaults.dev) out.dev = defaults.dev;
     if (detectedTypes.includes("C/C++") && fileList.some((p) => p.includes("CMakeLists"))) {
       if (!out.build) out.build = "cmake --build .";

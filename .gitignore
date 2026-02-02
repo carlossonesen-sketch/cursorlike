@@ -67,3 +67,12 @@ source/DevAssistant/**
 # local tools
 tools/
 
+# Backup and junk files (do not track)
+*.bak
+*.bak2
+*.bak3
+*.bak4
+*.bak5
+*.bak-*
+*.bak*
+

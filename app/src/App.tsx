@@ -1,4 +1,4 @@
-﻿// NOTE: temporary comment added for testing the file-edit flow.
+// NOTE: temporary comment added for testing the file-edit flow.
 
 import { useState, useCallback, useRef, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -16,6 +16,7 @@ import {
   scanModelsForGGUF,
   toolRootExists,
   resolveModelPath,
+  LLAMA_SERVER_REL,
   generatePlanAndPatch,
   generateChatResponse,
   runPipeline,
@@ -64,7 +65,7 @@ import type {
   AgentMode,
   ProjectSnapshot,
 } from "./core/types";
-import type { Provider, LocalModelSettings, Prereq, MissingPrereqResult, RecommendedPrereqResult, MultiFileProposal, ProposedFileChange, DevMode } from "./core/types";
+import type { Provider, LocalModelSettings, Prereq, MissingPrereqResult, RecommendedPrereqResult, MultiFileProposal, ProposedFileChange, DevMode, VerificationResult } from "./core";
 import type { FileSnapshot } from "./core/patch/PatchEngine";
 import { diffLines } from "diff";
 import type { ResumeSuggestion } from "./core";
@@ -221,6 +222,7 @@ export default function App() {
   const [autoPacksEnabled, setAutoPacksEnabled] = useState(true);
   const [modelPath, setModelPath] = useState<string | undefined>(undefined);
   const [toolRoot, setToolRoot] = useState<string | null>(null);
+  const [hasLlamaAtToolRoot, setHasLlamaAtToolRoot] = useState(false);
   const [port, setPort] = useState<number>(11435);
   const [provider, setProvider] = useState<Provider>("local");
   const [localSettings, setLocalSettings] = useState<LocalModelSettings>(() => ({
@@ -291,9 +293,11 @@ export default function App() {
     const tr = await findToolRoot(root);
     if (!tr) {
       setToolRoot(null);
+      setHasLlamaAtToolRoot(false);
       return;
     }
     setToolRoot(tr);
+    setHasLlamaAtToolRoot(await toolRootExists(tr, LLAMA_SERVER_REL));
     const settings = await readWorkspaceSettings(root);
     const mp = settings.modelPath?.trim();
     if (mp && (await toolRootExists(tr, mp))) return;
@@ -304,6 +308,15 @@ export default function App() {
     setModelPath(scanned);
     setLocalSettings((prev) => ({ ...prev, ggufPath: resolveModelPath(tr, scanned) }));
   }, []);
+
+  const onInitializeTools = useCallback(async () => {
+    try {
+      await workspace.ensureGlobalToolDirs();
+      await runLocalModelAutoScan();
+    } catch (e) {
+      console.error("Initialize Tools failed:", e);
+    }
+  }, [runLocalModelAutoScan]);
 
   useEffect(() => {
     if (provider !== "local" || !workspacePath) return;
@@ -375,7 +388,8 @@ export default function App() {
     setProjectSnapshot(null);
     setEnabledPacks([]);
     setToolRoot(null);
-    setStatusLine("Scanning workspaceâ€¦");
+    setHasLlamaAtToolRoot(false);
+    setStatusLine("Scanning workspace…");
     try {
       const root = workspace.root ?? path;
 
@@ -430,6 +444,7 @@ export default function App() {
 
       const tr = await findToolRoot(root);
       setToolRoot(tr);
+      setHasLlamaAtToolRoot(tr ? await toolRootExists(tr, LLAMA_SERVER_REL) : false);
       setPort(settings.port ?? 11435);
       let modelPathNext = settings.modelPath?.trim() || undefined;
       if (tr) {
@@ -1995,6 +2010,8 @@ export default function App() {
           provider={provider}
           onProviderChange={setProvider}
           toolRoot={toolRoot}
+          hasLlamaAtToolRoot={hasLlamaAtToolRoot}
+          onInitializeTools={onInitializeTools}
           localSettings={localSettings}
           onLocalSettingsChange={setLocalSettings}
           onRescanModels={rescanModels}
@@ -2077,6 +2094,7 @@ export default function App() {
     </div>
   );
 }
+
 
 
 

@@ -65,10 +65,25 @@ export async function runtimeChat(
   });
 }
 
+/** Relative path to llama-server.exe under toolRoot. */
+export const LLAMA_SERVER_REL = "runtime/llama/llama-server.exe";
+
 /** Walk up from workspace_root (up to 8 levels). First dir with runtime/llama + models/ is toolRoot. */
+/** Effective toolRoot = local (if has llama-server) ?? global. Returns global path even when llama-server is missing (for Initialize Tools). */
 export async function findToolRoot(workspaceRoot: string): Promise<string | null> {
-  const result = await invoke<unknown>("find_tool_root", { workspaceRoot });
-  return typeof result === "string" ? result : null;
+  const local = await invoke<unknown>("find_tool_root", { workspaceRoot });
+  if (typeof local === "string" && local) {
+    const hasLlama = await toolRootExists(local, LLAMA_SERVER_REL);
+    if (hasLlama) return local;
+  }
+
+  try {
+    const globalRoot = await invoke<string>("get_global_tool_root");
+    if (globalRoot?.trim()) return globalRoot;
+  } catch {
+    /* fall through */
+  }
+  return null;
 }
 
 /** Scan toolRoot/models for *.gguf. Returns toolRoot-relative path (e.g. models/foo.gguf) or null. */

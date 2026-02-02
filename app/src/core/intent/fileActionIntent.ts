@@ -18,8 +18,8 @@ export interface FileActionIntent {
   instructions: string;
 }
 
-const OPEN_VERBS = /\b(open|show|view|read|display)\b/i;
-const EDIT_VERBS = /\b(edit|change|modify|update|fix|add|remove|delete|replace|rename|move|prepend|append)\b/i;
+const OPEN_VERBS = /\b(open|show|view|navigate)\b/i;
+const EDIT_VERBS = /\b(edit|modify|update|change|fix|refactor|add|remove|create|rename|move)\b/i;
 
 /** Extract edit instruction portion from message (text after "and" or file reference). */
 function extractInstructions(message: string, primaryPath: string): string {
@@ -39,13 +39,17 @@ function extractInstructions(message: string, primaryPath: string): string {
   return t.replace(new RegExp(pathLower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "").trim();
 }
 
+/** "This file" / "current file" / "here" reference patterns. */
+const CURRENT_FILE_REF = /\b(this\s+file|current\s+file|the\s+file|here)\b/i;
+
 /**
  * Classify file action intent from user message.
  * Pure logic; does not verify file existence.
+ * Pass currentOpenFilePath when a file is open in the editor for "this file" / "here" references.
  */
 export function classifyFileActionIntent(
   message: string,
-  _context?: { currentOpenFilePath?: string }
+  context?: { currentOpenFilePath?: string }
 ): FileActionIntent {
   const t = message.trim();
   if (!t) {
@@ -53,14 +57,19 @@ export function classifyFileActionIntent(
   }
 
   const mentions = extractFileMentions(t);
-  if (mentions.length === 0) {
+  let targets: FileTarget[];
+
+  // "This file" / "here" reference: use currentOpenFilePath if available
+  if (CURRENT_FILE_REF.test(t) && context?.currentOpenFilePath) {
+    targets = [{ path: context.currentOpenFilePath, confidence: 1 }];
+  } else if (mentions.length > 0) {
+    targets = mentions.map((path, i) => ({
+      path,
+      confidence: 1 - i * 0.1,
+    }));
+  } else {
     return { intentType: "none", targets: [], instructions: "" };
   }
-
-  const targets: FileTarget[] = mentions.map((path, i) => ({
-    path,
-    confidence: 1 - i * 0.1,
-  }));
 
   const hasOpen = OPEN_VERBS.test(t);
   const hasEdit = EDIT_VERBS.test(t);
@@ -69,11 +78,11 @@ export function classifyFileActionIntent(
     return {
       intentType: "file_edit",
       targets,
-      instructions: extractInstructions(t, mentions[0]),
+      instructions: extractInstructions(t, targets[0].path),
     };
   }
 
-  if (hasOpen) {
+  if (hasOpen && !hasEdit) {
     return {
       intentType: "file_open",
       targets,
@@ -81,7 +90,7 @@ export function classifyFileActionIntent(
     };
   }
 
-  if (targets.length > 0) {
+  if (targets.length > 0 && !hasEdit) {
     return {
       intentType: "file_open",
       targets,
