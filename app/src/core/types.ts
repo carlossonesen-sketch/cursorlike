@@ -1,4 +1,4 @@
-/** Shared types for DevAssistant core. */
+﻿/** Shared types for DevAssistant core. */
 
 export interface DirEntry {
   name: string;
@@ -81,6 +81,8 @@ export interface KnowledgeChunkRef {
 export interface PlanAndPatch {
   explanation: string;
   patch: string;
+  /** Optional incremental edit plan used for step-by-step preview/apply. */
+  editPlan?: import("./patch/EditPlan").EditPlan;
   /** True when diff was built from direct file edit (model did not return valid unified diff). */
   fallbackDiff?: boolean;
   /** True when patch was capped for display (use full patch for apply). */
@@ -176,3 +178,4 @@ export interface RetrievedChunk {
   chunkText: string;
   score: number;
 }
+

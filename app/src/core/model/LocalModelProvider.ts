@@ -1,4 +1,4 @@
-/**
+﻿/**
  * LocalModelProvider: plan-based patch pipeline.
  * A) Model produces ONLY a compact JSON edit plan (targetFiles + operations: insert_after, replace_range, append, prepend).
  * B) We apply the plan locally (string-based).
@@ -18,6 +18,7 @@ import {
 import { extractUnifiedDiff, extractExplanation } from "../runtime/parseCoderOutput";
 import { generateFileEdit } from "../intent/simpleEdit";
 import * as diff from "diff";
+import { validateEditPlan, type EditPlan as IncrementalEditPlan } from "../patch/EditPlan";
 
 /** Operation kinds: anchor = exact string to find, line = 1-based line number. */
 type EditOp =
@@ -82,7 +83,23 @@ function parseEditPlan(raw: string): EditPlan | null {
   }
 }
 
-/** Apply one operation to content. Returns new content. */
+function parseIncrementalEditPlan(raw: string): IncrementalEditPlan | null {
+  const trimmed = raw.trim();
+  const jsonMatch = trimmed.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) return null;
+
+  // Strip trailing commas (common LLM quirk)
+  const jsonStr = jsonMatch[0].replace(/,\s*([}\]])/g, "$1");
+
+  try {
+    const data = JSON.parse(jsonStr) as unknown;
+    const validated = validateEditPlan(data);
+    return validated.ok ? validated.value : null;
+  } catch {
+    return null;
+  }
+}
+/\*\* Apply one operation to content\. Returns new content\. \*/
 function applyOp(content: string, op: EditOp): string {
   const lines = content.split(/\r?\n/);
   const lineCount = lines.length;
@@ -161,8 +178,13 @@ function buildEditPlanPrompt(ctx: ModelContext, plan: string): string {
     ? ctx.selectedFiles.filter((f) => targetPaths.includes(f.path))
     : ctx.selectedFiles;
   parts.push("");
-  parts.push('JSON format (exact keys): {"targetFiles":["path1","path2"],"fileEdits":[{"path":"path1","operations":[{"op":"replace_range","startLine":1,"endLine":2,"newText":"..."},{"op":"insert_after","anchor":"exact string to find","newText":"..."},{"op":"insert_after","line":5,"newText":"..."},{"op":"append","newText":"..."},{"op":"prepend","newText":"..."}]}]}');
-  parts.push("Operations: replace_range (1-based, endLine inclusive), insert_after (use anchor OR line), append, prepend. path must match one of: " + targetPaths.join(", "));
+  parts.push('JSON format (exact keys): {"version":1,"steps":[{"id":"step-1","filePath":"relative/path.ts","operation":"modify","summary":"...","rationale":"...","operations":[{"kind":"replace_range","startLine":1,"endLine":2,"newText":"..."},{"kind":"search_and_replace","search":"EXACT","replace":"...","all":false},{"kind":"append","newText":"..."},{"kind":"prepend","newText":"..."}]}]}' );
+  parts.push("- steps must be ordered; each step touches exactly ONE filePath.");
+  parts.push("- operation is one of: modify | create | delete.");
+  parts.push("- For delete: operations MUST be empty array.");
+  parts.push("- For modify/create: operations must be non-empty.");
+  parts.push("- Use workspace-relative paths with forward slashes. filePath must match one of: " + targetPaths.join(", "));
+  parts.push("- Operations kinds: replace_range (1-based, endLine inclusive), search_and_replace (exact match), append, prepend.");
   if (files.length) {
     parts.push("");
     parts.push("Current file contents (for anchors and line numbers):");
@@ -255,7 +277,7 @@ export class LocalModelProvider implements IModelProvider {
     await ensureLocalRuntime(settings, this.getToolRoot(), this.getPort());
     const opts = this.getGenerateOptions();
 
-    // Step 1: Structured plan (files, intent, exact changes) — stream: true, max 256
+    // Step 1: Structured plan (files, intent, exact changes) â€” stream: true, max 256
     const planPrompt = buildPlanPrompt(ctx);
     const planRaw = await runtimeGenerate(planPrompt, true, {
       temperature: opts.temperature ?? settings.temperature,
@@ -270,7 +292,7 @@ export class LocalModelProvider implements IModelProvider {
       : ctx.selectedFiles;
     const fileByPath = new Map(files.map((f) => [f.path, f]));
 
-    // Pass A: Edit plan JSON → apply locally → generate unified diff locally (no model diff)
+    // Pass A: Edit plan JSON â†’ apply locally â†’ generate unified diff locally (no model diff)
     const editPlanPrompt = buildEditPlanPrompt(ctx, plan);
     const editPlanOpts = {
       temperature: Math.max(0, (opts.temperature ?? settings.temperature) - 0.1),
@@ -278,10 +300,17 @@ export class LocalModelProvider implements IModelProvider {
       max_tokens: Math.min(4096, opts.max_tokens ?? settings.max_tokens),
     };
     let editPlanRaw = await runtimeGenerate(editPlanPrompt, true, editPlanOpts, ctx.runId);
-    let editPlan = parseEditPlan(editPlanRaw || "");
-    if (!editPlan && editPlanRaw?.trim()) {
-      editPlanRaw = await runtimeGenerate(editPlanPrompt + "\n\nOutput ONLY valid JSON. No markdown, no explanation.", false, { ...editPlanOpts, temperature: 0.1 }, ctx.runId);
-      editPlan = parseEditPlan(editPlanRaw || "");
+    let incrementalEditPlan = parseIncrementalEditPlan(editPlanRaw || "") ?? undefined;
+    let editPlan = incrementalEditPlan ? null : parseEditPlan(editPlanRaw || "");
+    if (!incrementalEditPlan && !editPlan && editPlanRaw?.trim()) {
+      editPlanRaw = await runtimeGenerate(
+        editPlanPrompt + "\n\nOutput ONLY valid JSON. No markdown, no explanation.",
+        false,
+        { ...editPlanOpts, temperature: 0.1 },
+        ctx.runId
+      );
+      incrementalEditPlan = parseIncrementalEditPlan(editPlanRaw || "") ?? undefined;
+      editPlan = incrementalEditPlan ? null : parseEditPlan(editPlanRaw || "");
     }
     if (editPlan && editPlan.fileEdits.length > 0) {
       const patches: string[] = [];
@@ -313,11 +342,11 @@ export class LocalModelProvider implements IModelProvider {
       }
       if (applied > 0 && patches.length > 0) {
         const patch = patches.join("\n");
-        return { explanation: plan, patch };
+        return { explanation: plan, patch, editPlan: (incrementalEditPlan ?? undefined) };
       }
     }
 
-    // Pass B (fallback): Model generates unified diff — cap at 120s total (caller) and 300 lines output
+    // Pass B (fallback): Model generates unified diff â€” cap at 120s total (caller) and 300 lines output
     const diffPrompt = buildDiffOnlyPrompt(ctx, plan);
     let raw = await runtimeGenerate(diffPrompt, false, {
       temperature: Math.max(0, (opts.temperature ?? settings.temperature) - 0.1),
@@ -409,3 +438,10 @@ export class LocalModelProvider implements IModelProvider {
     }
   }
 }
+
+
+
+
+
+
+
