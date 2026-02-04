@@ -14,7 +14,7 @@ import {
 
 const CONFIG_PATH = ".devassistant/runtime_config.json";
 const LOG_REL = ".devassistant/logs/llama-server.log";
-const DEFAULT_PORT = 11435;
+const DEFAULT_PORT = 8080;
 const DEFAULT_CTX = 4096;
 const LLAMA_REL = "runtime/llama/llama-server.exe";
 

@@ -51,8 +51,10 @@ export interface WorkspaceSettings {
   devMode?: DevMode;
   /** ToolRoot-relative path to GGUF (e.g. models/foo.gguf) for provider=local. */
   modelPath?: string;
-  /** Port for llama-server (default 11435). */
+  /** Port for llama-server (default 8080, overridable by env LLAMA_PORT). */
   port?: number;
+  /** Live pane open state (persisted per workspace). */
+  livePaneOpen?: boolean;
 }
 
 export interface ModelContext {
@@ -65,6 +67,8 @@ export interface ModelContext {
   targetFiles?: string[];
   /** Retrieved knowledge chunks (title + sourcePath + chunkText). */
   knowledgeChunks?: KnowledgeChunkRef[];
+  /** Optional run id for cancellation; passed to backend so runtime_cancel_run can abort in-flight request. */
+  runId?: string;
 }
 
 /** One knowledge chunk reference for context (and UI display). */
@@ -77,6 +81,12 @@ export interface KnowledgeChunkRef {
 export interface PlanAndPatch {
   explanation: string;
   patch: string;
+  /** True when diff was built from direct file edit (model did not return valid unified diff). */
+  fallbackDiff?: boolean;
+  /** True when patch was capped for display (use full patch for apply). */
+  partialDiff?: boolean;
+  /** Capped patch for display when partialDiff (max 400 lines / 25k chars). */
+  cappedPatch?: string;
 }
 
 /** Confidence of grounded summary after validation. */

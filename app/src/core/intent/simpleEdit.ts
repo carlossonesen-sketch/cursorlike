@@ -10,6 +10,8 @@ export interface GenerateFileEditOptions {
   originalContent: string;
   instructions: string;
   isNewFile: boolean;
+  /** Optional run id for cancellation. */
+  runId?: string;
 }
 
 export interface GenerateFileEditResult {
@@ -138,7 +140,7 @@ function extractPlanFromInstructions(instructions: string, isNewFile: boolean): 
  * Falls back to simple edit if model is unavailable.
  */
 export async function generateFileEdit(opts: GenerateFileEditOptions): Promise<GenerateFileEditResult> {
-  const { filePath, originalContent, instructions, isNewFile } = opts;
+  const { filePath: _filePath, originalContent, instructions, isNewFile } = opts;
   
   // First, try simple edit patterns
   if (!isNewFile && isSimpleEditPatternMatched(instructions)) {
@@ -160,7 +162,7 @@ export async function generateFileEdit(opts: GenerateFileEditOptions): Promise<G
     const response = await runtimeChat(systemPrompt, userPrompt, {
       temperature: 0.2,
       max_tokens: 8192,
-    });
+    }, opts.runId);
     
     // Clean up response - remove markdown code blocks if present
     let content = response.trim();

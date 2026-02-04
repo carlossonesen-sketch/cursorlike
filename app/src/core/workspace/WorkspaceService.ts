@@ -185,6 +185,11 @@ export class WorkspaceService {
     );
   }
 
+  /** Download a file from URL to path (must be under global tool root). No shell; avoids URL parsing issues. */
+  async downloadFileToPath(url: string, outputPath: string): Promise<{ bytesWritten: number }> {
+    return invoke<{ bytesWritten: number }>("download_file_to_path", { url, outputPath });
+  }
+
   /** Run a command in the workspace directory. Returns exit code, stdout, stderr. */
   async runCommand(workspaceRoot: string, command: string): Promise<{
     exitCode: number;

@@ -425,7 +425,7 @@ export function FilesPane({
               <div className="file-edit-diff-view">
                 {(() => {
                   const changes = diffLines(fileEditState.baselineText, fileEditState.editedText);
-                  const hasChanges = changes.some((c) => c.added || c.removed);
+                  const hasChanges = changes.some((c: { added?: boolean; removed?: boolean }) => c.added || c.removed);
                   if (!hasChanges) {
                     return <p className="muted">No changes yet.</p>;
                   }

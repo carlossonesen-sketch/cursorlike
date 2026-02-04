@@ -28,6 +28,7 @@ export async function readWorkspaceSettings(
       devMode: data.devMode === "safe" || data.devMode === "fast" ? data.devMode : "fast",
       modelPath: typeof data.modelPath === "string" && data.modelPath.trim() ? data.modelPath.trim() : undefined,
       port: typeof data.port === "number" && data.port > 0 ? data.port : undefined,
+      livePaneOpen: typeof data.livePaneOpen === "boolean" ? data.livePaneOpen : undefined,
     };
   } catch {
     return { ...DEFAULT_SETTINGS };

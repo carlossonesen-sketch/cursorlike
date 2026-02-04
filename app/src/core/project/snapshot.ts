@@ -107,7 +107,7 @@ export async function generateSnapshotData(
  * Resolve output path: .devassistant/project_snapshot.json under project root.
  * (App data dir not implemented - use project root.)
  */
-export function getSnapshotOutputPath(projectRoot: string): string {
+export function getSnapshotOutputPath(_projectRoot: string): string {
   return ".devassistant/project_snapshot.json";
 }
 

@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { ProposalCard } from "./ProposalCard";
+import { PrerequisitesPanel } from "./PrerequisitesPanel";
 import { RuntimeStatusPanel } from "./RuntimeStatusPanel";
 import type {
   PlanAndPatch,
@@ -46,7 +47,15 @@ interface ConversationPaneProps {
   onProviderChange: (value: Provider) => void;
   toolRoot: string | null;
   hasLlamaAtToolRoot: boolean;
+  runtimeHealthStatus: "ok" | "missing_runtime" | "missing_model" | null;
+  providerFallbackMessage: string | null;
+  downloadLog: string | null;
+  downloadInProgress: boolean;
   onInitializeTools: () => Promise<void>;
+  onOpenToolsFolder: () => Promise<void>;
+  onDownloadRecommendedModel: () => Promise<void>;
+  onRecheckRuntime: () => Promise<void>;
+  onRetryLocalProvider: () => Promise<void>;
   localSettings: LocalModelSettings;
   onLocalSettingsChange: (value: LocalModelSettings) => void;
   onRescanModels: () => void;
@@ -88,9 +97,10 @@ interface ConversationPaneProps {
   onDevModeChange: (mode: import("../core/types").DevMode) => void;
   proposalStack: import("../App").ProposalEntry[];
   activeProposalId: string | null;
-  activeProposalStatus: "proposed" | "pending" | "applied" | "reverted" | "discarded" | null;
+  activeProposalStatus: "proposed" | "pending" | "applied" | "reverted" | "discarded" | "superseded" | null;
   onReviewProposal: (id: string) => void;
   onDiscardProposal: (id: string) => void;
+  lastFileChoiceCandidates: string[] | null;
 }
 
 export function ConversationPane({
@@ -105,8 +115,8 @@ export function ConversationPane({
   workspaceRoot,
   resume,
   viewingSessionId,
-  agentMode,
-  onAgentModeChange,
+  agentMode: _agentMode,
+  onAgentModeChange: _onAgentModeChange,
   useKnowledgePacks,
   onUseKnowledgePacksChange,
   lastRetrievedChunks,
@@ -117,17 +127,25 @@ export function ConversationPane({
   onAutoPacksEnabledChange,
   onRefreshSnapshot,
   provider,
-  onProviderChange,
+  onProviderChange: _onProviderChange,
   toolRoot,
   hasLlamaAtToolRoot,
+  runtimeHealthStatus,
+  providerFallbackMessage,
+  downloadLog,
+  downloadInProgress,
   onInitializeTools,
+  onOpenToolsFolder,
+  onDownloadRecommendedModel,
+  onRecheckRuntime,
+  onRetryLocalProvider,
   localSettings,
   onLocalSettingsChange,
   onRescanModels,
   onPickGGUF,
   onSendChatMessage,
-  onProposePatch,
-  onRunPipeline,
+  onProposePatch: _onProposePatch,
+  onRunPipeline: _onRunPipeline,
   onKeep,
   onRevert,
   onSaveLater,
@@ -138,7 +156,7 @@ export function ConversationPane({
   onCancelPendingEdit,
   multiFileProposal,
   includedFilePaths,
-  onToggleIncludedFile,
+  onToggleIncludedFile: _onToggleIncludedFile,
   onApplyMultiFileSelected,
   onCancelMultiFileProposal,
   verificationResults,
@@ -156,6 +174,7 @@ export function ConversationPane({
   onInstallPrereq,
   onOpenPrereqLink,
   onInstallAllSafe,
+  onInstallAllAdvanced,
   onRecheckPrereqs,
   devMode,
   onDevModeChange,
@@ -164,6 +183,7 @@ export function ConversationPane({
   activeProposalStatus,
   onReviewProposal,
   onDiscardProposal,
+  lastFileChoiceCandidates,
 }: ConversationPaneProps) {
   const canApplyActive = activeProposalStatus === "pending";
   const [prompt, setPrompt] = useState("");
@@ -187,20 +207,6 @@ export function ConversationPane({
     const t = prompt.trim() || "(no prompt)";
     if (!t || !workspaceRoot) return;
     onSendChatMessage(t);
-    setPrompt("");
-  };
-
-  const handlePropose = () => {
-    const t = prompt.trim() || "(no prompt)";
-    if (!t || !workspaceRoot) return;
-    onProposePatch(t);
-    setPrompt("");
-  };
-
-  const handlePipeline = () => {
-    const t = prompt.trim() || "(no prompt)";
-    if (!t || !workspaceRoot) return;
-    onRunPipeline(t);
     setPrompt("");
   };
 
@@ -280,6 +286,23 @@ export function ConversationPane({
             <p>{m.text}</p>
           </div>
         ))}
+        {lastFileChoiceCandidates && lastFileChoiceCandidates.length > 0 && (
+          <div className="message assistant file-choice-block">
+            <strong>Pick a file</strong>
+            <div className="file-choice-options">
+              {lastFileChoiceCandidates.map((path, i) => (
+                <button
+                  key={path}
+                  type="button"
+                  className="btn file-choice-btn"
+                  onClick={() => onSendChatMessage(String(i + 1))}
+                >
+                  {i + 1}. {path}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         {plannerOutput && (
           <div className="message assistant pipeline-block">
             <strong>Planner</strong>
@@ -418,7 +441,7 @@ export function ConversationPane({
           <div className="message assistant verification-results">
             <strong>Verification results</strong>
             <div className="verification-stages">
-              {verificationResults.stages.map((s, i) => (
+              {verificationResults.stages.map((s, _i) => (
                 <details key={s.name} className={s.passed ? "passed" : "failed"}>
                   <summary>
                     {s.passed ? "✓" : "✗"} {s.name} ({s.command})
@@ -520,24 +543,53 @@ export function ConversationPane({
       )}
       <div className="conversation-input">
         <div className="model-settings">
-          {provider === "local" && (
+          {providerFallbackMessage && (
+            <div className="message assistant provider-fallback-msg">
+              <p>{providerFallbackMessage}</p>
+              <button type="button" className="btn primary" onClick={onRetryLocalProvider}>
+                Retry local provider
+              </button>
+            </div>
+          )}
+          {(provider === "local" || providerFallbackMessage) && (
             <>
-              {workspaceRoot && (!toolRoot || !hasLlamaAtToolRoot) && (
-                <div className="local-error-msg">
+              {workspaceRoot && (runtimeHealthStatus === "missing_runtime" || runtimeHealthStatus === "missing_model" || (!toolRoot || !hasLlamaAtToolRoot) || (toolRoot && hasLlamaAtToolRoot && !localSettings.ggufPath?.trim())) && (
+                <div className="local-error-msg runtime-health-banner">
                   <p>
                     {!toolRoot
                       ? "Could not find tools folder."
-                      : "Place llama-server.exe under toolRoot/runtime/llama to use the local model."}
+                      : runtimeHealthStatus === "missing_runtime"
+                        ? "Place llama-server.exe under toolRoot/runtime/llama to use the local model."
+                        : runtimeHealthStatus === "missing_model" || (hasLlamaAtToolRoot && !localSettings.ggufPath?.trim())
+                          ? "No GGUF model found. Add a .gguf to toolRoot/models or download one below."
+                          : "Place llama-server.exe under toolRoot/runtime/llama to use the local model."}
                   </p>
-                  <button type="button" className="btn primary" onClick={onInitializeTools}>
-                    Initialize Tools
-                  </button>
+                  <div className="runtime-health-actions">
+                    <button type="button" className="btn" onClick={onInitializeTools}>
+                      Initialize Tools
+                    </button>
+                    <button type="button" className="btn" onClick={onOpenToolsFolder}>
+                      Open tools folder
+                    </button>
+                    <button type="button" className="btn primary" onClick={onDownloadRecommendedModel} disabled={downloadInProgress}>
+                      {downloadInProgress ? "Downloading…" : "Download recommended model (Qwen2.5 7B Q4_K_M)"}
+                    </button>
+                    <button type="button" className="btn" onClick={onRescanModels}>
+                      Rescan models
+                    </button>
+                    <button type="button" className="btn" onClick={onRecheckRuntime}>
+                      I already installed it
+                    </button>
+                  </div>
                   <p className="local-init-hint">
-                    Creates folders under %LOCALAPPDATA%\DevAssistantCursorLite\tools. Then add llama-server.exe to runtime\llama and a .gguf to models.
+                    Tools folder: %LOCALAPPDATA%\DevAssistantCursorLite\tools. Add llama-server.exe to runtime\llama and a .gguf to models.
                   </p>
+                  {downloadLog && (
+                    <pre className="download-log">{downloadLog}</pre>
+                  )}
                 </div>
               )}
-              {toolRoot && hasLlamaAtToolRoot && !localSettings.ggufPath?.trim() && (
+              {toolRoot && hasLlamaAtToolRoot && !localSettings.ggufPath?.trim() && runtimeHealthStatus !== "missing_runtime" && runtimeHealthStatus !== "missing_model" && (
                 <p className="local-no-gguf-msg">
                   Drop a .gguf into <code>{toolRoot.replace(/\\/g, "/").replace(/\/+$/, "")}/models</code>
                 </p>

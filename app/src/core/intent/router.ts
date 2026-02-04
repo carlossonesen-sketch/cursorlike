@@ -1,16 +1,14 @@
 /**
  * Message router: prioritizes file actions over generic chat.
+ * OPEN bypasses proposal; single-file EDIT never goes to multi_file_edit.
  */
 
-import {
-  classifyFileActionIntent,
-  type FileActionIntent,
-  type FileActionIntentType,
-} from "./fileActionIntent";
+import { classifyFileActionIntent } from "./fileActionIntent";
 
 export type RouteDecision =
   | { action: "file_open"; targetPath: string }
   | { action: "file_edit"; targets: string[]; instructions: string }
+  | { action: "file_edit_auto_search"; instructions: string }
   | { action: "multi_file_edit"; instructions: string; targetHints?: string[] }
   | { action: "chat" };
 
@@ -35,58 +33,84 @@ export function impliesMultiFile(prompt: string): boolean {
 
 /**
  * Route user message. Must be called before any chat/patch generation.
- * Pass context.currentOpenFilePath when a file is open for "this file" / "here" references.
+ * - OPEN intent -> file_open only (bypass proposal).
+ * - EDIT intent with explicit path(s) -> file_edit with targetFiles (single-file never multi_file_edit).
+ * - multi_file_edit only when multiple paths or prompt implies multi-file (and no single-file EDIT).
  */
 export function routeUserMessage(message: string, context?: RouteContext): RouteDecision {
   const intent = classifyFileActionIntent(message, context);
-  const hasEditVerb = intent.intentType === "file_edit" || intent.intentType === "file_open";
+  const extractedFiles = intent.targets.map((t) => t.path);
 
-  // Multi-file: explicit multiple paths OR ambiguous prompt implying multiple files
-  const hasMultiplePaths = intent.targets.length > 1;
+  // Debug: every request
+  console.log("MESSAGE_ROUTING intent", {
+    detectedIntent: intent.intentType,
+    extractedFiles,
+    instructions: intent.instructions || "(none)",
+  });
+
+  // Edit intent but no file mentioned -> auto-search for likely file(s)
+  if (intent.intentType === "file_edit_search") {
+    const route: RouteDecision = { action: "file_edit_auto_search", instructions: intent.instructions };
+    console.log("MESSAGE_ROUTING chosenRoute: file_edit_auto_search", "instructions:", route.instructions.slice(0, 60));
+    return route;
+  }
+
+  if (intent.intentType === "none") {
+    if (!impliesMultiFile(message)) {
+      console.log("MESSAGE_ROUTING chosenRoute: chat (no file intent)");
+      return { action: "chat" };
+    }
+    // Implies multi but no paths -> multi_file_edit so LLM can propose
+    const route: RouteDecision = {
+      action: "multi_file_edit",
+      instructions: message.trim(),
+      targetHints: undefined,
+    };
+    console.log("MESSAGE_ROUTING chosenRoute:", route.action, "targetHints:", route.targetHints);
+    return route;
+  }
+
+  const hasMultiplePaths = extractedFiles.length > 1;
   const impliesMulti = impliesMultiFile(message);
 
-  if (intent.intentType === "none" && !impliesMulti) {
-    console.log("router: no file intent, fallback to chat");
-    return { action: "chat" };
+  // OPEN: always file_open, bypass proposal entirely
+  if (intent.intentType === "file_open" && extractedFiles.length > 0) {
+    const route: RouteDecision = { action: "file_open", targetPath: extractedFiles[0] };
+    console.log("MESSAGE_ROUTING chosenRoute: file_open", "targetPath:", route.targetPath);
+    return route;
   }
 
-  const paths = intent.targets.map((t) => t.path);
-  console.log("router:", intent.intentType, "targets:", paths, "instructions:", intent.instructions || "(none)");
-
-  // Multi-file edit: multiple paths OR (implies multi-file AND has edit verb)
-  if (hasEditVerb && (hasMultiplePaths || (impliesMulti && paths.length >= 0))) {
-    if (impliesMulti || hasMultiplePaths) {
-      return {
+  // EDIT with explicit path(s): file_edit with targetFiles (never multi_file_edit for single file)
+  if (intent.intentType === "file_edit" && extractedFiles.length > 0) {
+    if (hasMultiplePaths) {
+      const route: RouteDecision = {
         action: "multi_file_edit",
         instructions: intent.instructions || message,
-        targetHints: paths.length > 0 ? paths : undefined,
+        targetHints: extractedFiles,
       };
+      console.log("MESSAGE_ROUTING chosenRoute: multi_file_edit (multiple paths)", "targetHints:", route.targetHints);
+      return route;
     }
-  }
-
-  if (intent.intentType === "file_edit") {
-    return {
+    const route: RouteDecision = {
       action: "file_edit",
-      targets: paths,
+      targets: extractedFiles,
       instructions: intent.instructions,
     };
+    console.log("MESSAGE_ROUTING chosenRoute: file_edit", "targets:", route.targets);
+    return route;
   }
 
-  if (paths.length > 0) {
-    return {
-      action: "file_open",
-      targetPath: paths[0],
-    };
-  }
-
-  // Multi-file with no explicit paths: only if edit verb present (else chat)
-  if (impliesMulti && hasEditVerb) {
-    return {
+  // Implies multi-file but no explicit paths (e.g. "Update the code that selects GGUF...") -> multi_file_edit or chat
+  if (impliesMulti) {
+    const route: RouteDecision = {
       action: "multi_file_edit",
       instructions: intent.instructions || message,
-      targetHints: paths.length > 0 ? paths : undefined,
+      targetHints: extractedFiles.length > 0 ? extractedFiles : undefined,
     };
+    console.log("MESSAGE_ROUTING chosenRoute: multi_file_edit (implies multi)", "targetHints:", route.targetHints);
+    return route;
   }
 
+  console.log("MESSAGE_ROUTING chosenRoute: chat");
   return { action: "chat" };
 }

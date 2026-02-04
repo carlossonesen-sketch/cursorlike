@@ -6,6 +6,12 @@ export {
 } from "./fileActionIntent";
 export { routeUserMessage, impliesMultiFile, type RouteDecision } from "./router";
 export {
+  searchFilesForEdit,
+  extractSearchKeywords,
+  HIGH_CONFIDENCE_THRESHOLD,
+  type SearchCandidate,
+} from "./fileSearch";
+export {
   applySimpleEdit,
   generateSimpleEdit,
   generateFileEdit,

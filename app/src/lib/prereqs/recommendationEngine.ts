@@ -30,7 +30,7 @@ export interface RecommendationsResult {
  * Uses lightweight checks: file existence + minimal JSON parsing.
  */
 export async function detectProjectSignals(
-  projectRoot: string,
+  _projectRoot: string,
   checkFileExists: CheckFileExistsFn,
   readFile: ReadFileFn
 ): Promise<ProjectSignals> {

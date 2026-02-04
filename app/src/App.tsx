@@ -13,16 +13,20 @@ import {
   readWorkspaceSettings,
   writeWorkspaceSettings,
   findToolRoot,
+  getGlobalToolRoot,
   scanModelsForGGUF,
+  scanGlobalModelsGGUF,
   toolRootExists,
   resolveModelPath,
   LLAMA_SERVER_REL,
+  runtimeStart,
+  runtimeStatus as getRuntimeStatus,
+  runtimeStop,
+  runtimeHealthCheckStatus,
+  getRuntimeLog,
   generatePlanAndPatch,
   generateChatResponse,
   runPipeline,
-  defaultPlanner,
-  defaultCoder,
-  defaultReviewer,
   setModelProvider,
   MockModelProvider,
   LocalModelProvider,
@@ -32,12 +36,10 @@ import {
   MemoryStore,
   resumeSuggestion,
   DEFAULT_LOCAL_SETTINGS,
-  getRequestedFileHint,
   readProjectFile,
-  extractFileMentions,
   hasDiffRequest,
+  impliesMultiFile,
   routeUserMessage,
-  hasFileEditIntent,
   generateFileEdit,
   detectProjectRoot,
   getDefaultEnabledPackIds,
@@ -55,6 +57,25 @@ import {
   validateAndFixSummary,
   buildProposalGroundTruth,
   pickVerifyProfileFromSignals,
+  searchFilesForEdit,
+  HIGH_CONFIDENCE_THRESHOLD,
+  setCurrentRunId,
+  emitStep,
+  startProgressHeartbeat,
+  createRun,
+  registerRunToken,
+  unregisterRunToken,
+  raceWithCancel,
+  raceWithTimeout,
+  throwIfCancelled,
+  isActiveRun,
+  runtimeCancelRun,
+  CancelledError,
+  TimeoutError,
+  PLANNING_TIMEOUT_MS,
+  DIFF_GENERATION_TIMEOUT_MS,
+  VALIDATION_TIMEOUT_MS,
+  PLAN_AND_EDIT_PLAN_TIMEOUT_MS,
 } from "./core";
 import type {
   FileTreeNode,
@@ -65,15 +86,16 @@ import type {
   AgentMode,
   ProjectSnapshot,
 } from "./core/types";
-import type { Provider, LocalModelSettings, Prereq, MissingPrereqResult, RecommendedPrereqResult, MultiFileProposal, ProposedFileChange, DevMode, VerificationResult } from "./core";
+import type { Provider, LocalModelSettings, Prereq, MissingPrereqResult, RecommendedPrereqResult, MultiFileProposal, DevMode, VerificationResult } from "./core";
 import type { FileSnapshot } from "./core/patch/PatchEngine";
 import { diffLines } from "diff";
 import type { ResumeSuggestion } from "./core";
 import { TopBar } from "./components/TopBar";
 import { ConversationPane } from "./components/ConversationPane";
 import { FilesPane } from "./components/FilesPane";
-import { PrerequisitesPanel } from "./components/PrerequisitesPanel";
+import { LivePane, type RuntimeStatus } from "./components/LivePane";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { listen } from "@tauri-apps/api/event";
 import "./App.css";
 
 const workspace = new WorkspaceService();
@@ -223,12 +245,14 @@ export default function App() {
   const [modelPath, setModelPath] = useState<string | undefined>(undefined);
   const [toolRoot, setToolRoot] = useState<string | null>(null);
   const [hasLlamaAtToolRoot, setHasLlamaAtToolRoot] = useState(false);
-  const [port, setPort] = useState<number>(11435);
+  const [port, setPort] = useState<number>(8080);
   const [provider, setProvider] = useState<Provider>("local");
   const [localSettings, setLocalSettings] = useState<LocalModelSettings>(() => ({
     ...DEFAULT_LOCAL_SETTINGS,
   }));
   const [lastFileChoiceCandidates, setLastFileChoiceCandidates] = useState<string[] | null>(null);
+  const [livePaneOpen, setLivePaneOpen] = useState(true);
+  const [lastRunFailed, setLastRunFailed] = useState(false);
   const [proposalStack, setProposalStack] = useState<ProposalEntry[]>([]);
   const [activeProposalId, setActiveProposalId] = useState<string | null>(null);
   const [selectedMultiFileIndex, setSelectedMultiFileIndex] = useState(0);
@@ -265,12 +289,43 @@ export default function App() {
   const [devMode, setDevMode] = useState<DevMode>("fast");
   const [installLog, setInstallLog] = useState<string | null>(null);
   const [installInProgress, setInstallInProgress] = useState(false);
+  const [runtimeHealthStatus, setRuntimeHealthStatus] = useState<"ok" | "missing_runtime" | "missing_model" | null>(null);
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>("Down");
+  const [runtimePort, setRuntimePort] = useState<number | null>(null);
+  const [runtimeHealthStatusText, setRuntimeHealthStatusText] = useState<string | null>(null);
+  const [runtimeSpawnError, setRuntimeSpawnError] = useState<string | null>(null);
+  const [runtimeLogLines, setRuntimeLogLines] = useState<string[]>([]);
+  const [providerFallbackMessage, setProviderFallbackMessage] = useState<string | null>(null);
+  const [downloadLog, setDownloadLog] = useState<string | null>(null);
+  const [downloadInProgress, setDownloadInProgress] = useState(false);
   const localSettingsRef = useRef(localSettings);
   const toolRootRef = useRef<string | null>(null);
-  const portRef = useRef<number>(11435);
+  const portRef = useRef<number>(8080);
   localSettingsRef.current = localSettings;
   toolRootRef.current = toolRoot;
   portRef.current = port;
+
+  const streamingMessageIdRef = useRef<string | null>(null);
+  const currentStreamRunIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<{ run_id?: string; content: string }>("llama-stream-token", (event) => {
+      const runId = event.payload?.run_id ?? null;
+      const content = event.payload?.content ?? "";
+      if (runId !== null && runId === currentStreamRunIdRef.current && streamingMessageIdRef.current) {
+        const msgId = streamingMessageIdRef.current;
+        setMessages((prev) =>
+          prev.map((m) => (m.id === msgId ? { ...m, text: m.text + content } : m))
+        );
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     if (provider === "local") {
@@ -278,7 +333,7 @@ export default function App() {
         new LocalModelProvider(
           () => localSettingsRef.current,
           () => toolRootRef.current,
-          () => portRef.current ?? 11435,
+          () => portRef.current ?? 8080,
           () => ({})
         )
       );
@@ -322,6 +377,119 @@ export default function App() {
     if (provider !== "local" || !workspacePath) return;
     runLocalModelAutoScan();
   }, [provider, workspacePath, runLocalModelAutoScan]);
+
+  // Provider fallback: if local is selected but runtime is missing, switch to mock so app stays usable
+  useEffect(() => {
+    if (provider !== "local" || !workspacePath) return;
+    if (runtimeHealthStatus === "missing_runtime" || runtimeHealthStatus === "missing_model") {
+      setProvider("mock");
+      setProviderFallbackMessage("Local runtime missing. Switched to internal provider until you install llama-server + GGUF.");
+    }
+  }, [runtimeHealthStatus, provider, workspacePath]);
+
+  const runGlobalRuntimeHealthCheck = useCallback(async () => {
+    const root = workspace.root;
+    if (!root) return;
+    const tr = await findToolRoot(root);
+    setToolRoot(tr);
+    const hasLlama = tr ? await toolRootExists(tr, LLAMA_SERVER_REL) : false;
+    setHasLlamaAtToolRoot(hasLlama);
+    let modelPathNext: string | undefined;
+    if (tr) {
+      const scanned = await scanModelsForGGUF(tr);
+      if (scanned) {
+        modelPathNext = scanned;
+        const settings = await readWorkspaceSettings(root);
+        await writeWorkspaceSettings(root, { ...settings, modelPath: scanned }).catch(() => {});
+        setModelPath(scanned);
+        setLocalSettings((prev) => ({ ...prev, ggufPath: resolveModelPath(tr!, scanned) }));
+      }
+    }
+    const status: "ok" | "missing_runtime" | "missing_model" | null = !tr ? null : !hasLlama ? "missing_runtime" : !modelPathNext ? "missing_model" : "ok";
+    setRuntimeHealthStatus(status);
+    if (status === "ok") {
+      setProviderFallbackMessage(null);
+      setProvider("local");
+    }
+  }, []);
+
+  const onOpenToolsFolder = useCallback(async () => {
+    try {
+      const path = await workspace.getGlobalToolRoot();
+      const escaped = path.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      await workspace.runSystemCommand(`explorer "${escaped}"`);
+    } catch (e) {
+      console.error("onOpenToolsFolder", e);
+    }
+  }, []);
+
+  const RECOMMENDED_GGUF_URL = "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf";
+  const RECOMMENDED_GGUF_NAME = "qwen2.5-coder-7b-instruct-q4_k_m.gguf";
+  const MIN_GGUF_SIZE_BYTES = 50 * 1024 * 1024; // 50MB
+
+  const onDownloadRecommendedModel = useCallback(async () => {
+    setDownloadInProgress(true);
+    setDownloadLog("Preparing download…");
+    let tr = toolRoot;
+    if (!tr) {
+      try {
+        await workspace.ensureGlobalToolDirs();
+        tr = await workspace.getGlobalToolRoot();
+        setToolRoot(tr);
+      } catch (e) {
+        setDownloadLog(`Error: could not create tools folder. ${String(e)}`);
+        setDownloadInProgress(false);
+        return;
+      }
+    }
+    if (!tr) {
+      setDownloadLog("Error: could not get tools folder.");
+      setDownloadInProgress(false);
+      return;
+    }
+    const trBackslash = tr.replace(/\//g, "\\").replace(/\\+$/, "");
+    const modelsDir = `${trBackslash}\\models`;
+    const outPath = `${modelsDir}\\${RECOMMENDED_GGUF_NAME}`;
+    try {
+      setDownloadLog(`Downloading to: ${outPath}\n\nStarting…`);
+      const r = await workspace.downloadFileToPath(RECOMMENDED_GGUF_URL, outPath);
+      const sizeBytes = r.bytesWritten;
+      let log = `Out path: ${outPath}\n\nBytes written: ${sizeBytes} (${(sizeBytes / 1024 / 1024).toFixed(1)} MB)`;
+      setDownloadLog(log);
+      if (sizeBytes < MIN_GGUF_SIZE_BYTES) {
+        setDownloadLog(log + `\n\nError: Download too small (need > 50MB). Do not switch to local provider.`);
+        setDownloadInProgress(false);
+        return;
+      }
+      const scanned = await scanModelsForGGUF(tr);
+      if (scanned) {
+        const root = workspace.root;
+        if (root) {
+          const settings = await readWorkspaceSettings(root);
+          await writeWorkspaceSettings(root, { ...settings, modelPath: scanned }).catch(() => {});
+        }
+        setModelPath(scanned);
+        setLocalSettings((prev) => ({ ...prev, ggufPath: resolveModelPath(tr!, scanned) }));
+        setRuntimeHealthStatus("ok");
+        setProviderFallbackMessage(null);
+        const hasLlama = await toolRootExists(tr!, LLAMA_SERVER_REL);
+        if (hasLlama) setProvider("local");
+      }
+    } catch (e) {
+      setDownloadLog(`Error: ${String(e)}`);
+    } finally {
+      setDownloadInProgress(false);
+    }
+  }, [toolRoot]);
+
+  const onRecheckRuntime = useCallback(async () => {
+    setStatusLine("Checking runtime…");
+    try {
+      await runGlobalRuntimeHealthCheck();
+    } finally {
+      setStatusLine(null);
+    }
+  }, [runGlobalRuntimeHealthCheck]);
 
   const pickGGUFFile = useCallback(async () => {
     const selected = await open({
@@ -444,8 +612,9 @@ export default function App() {
 
       const tr = await findToolRoot(root);
       setToolRoot(tr);
-      setHasLlamaAtToolRoot(tr ? await toolRootExists(tr, LLAMA_SERVER_REL) : false);
-      setPort(settings.port ?? 11435);
+      const hasLlama = tr ? await toolRootExists(tr, LLAMA_SERVER_REL) : false;
+      setHasLlamaAtToolRoot(hasLlama);
+      setPort(settings.port ?? 8080);
       let modelPathNext = settings.modelPath?.trim() || undefined;
       if (tr) {
         const missing = !modelPathNext || !(await toolRootExists(tr, modelPathNext));
@@ -454,19 +623,24 @@ export default function App() {
           if (scanned) modelPathNext = scanned;
         }
       }
-      const newSettings = {
+          const newSettings = {
         autoPacksEnabled: settings.autoPacksEnabled,
         enabledPacks: enabled,
         devMode: settings.devMode ?? "fast",
         modelPath: modelPathNext,
-        port: settings.port ?? 11435,
+        port: settings.port ?? 8080,
+        livePaneOpen: settings.livePaneOpen ?? true,
       };
       await writeWorkspaceSettings(root, newSettings).catch(() => {});
+      setLivePaneOpen(newSettings.livePaneOpen);
       setModelPath(modelPathNext);
       setLocalSettings((prev) => ({
         ...prev,
         ggufPath: modelPathNext && tr ? resolveModelPath(tr, modelPathNext) : "",
       }));
+      const healthStatus: "ok" | "missing_runtime" | "missing_model" | null = !tr ? null : !hasLlama ? "missing_runtime" : !modelPathNext ? "missing_model" : "ok";
+      setRuntimeHealthStatus(healthStatus);
+      if (healthStatus === "ok") setProviderFallbackMessage(null);
       const snapshot: ProjectSnapshot = {
         detectedTypes: detected.detectedTypes,
         recommendedPacks: detected.recommendedPacks,
@@ -568,20 +742,67 @@ export default function App() {
       // ROUTING: File actions FIRST, before any chat logic
       const activeFilePath = fileEditState?.relativePath ?? undefined;
       const route = routeUserMessage(p, { activeFilePath, currentOpenFilePath: activeFilePath, workspaceRoot: root });
-      console.log("MESSAGE_ROUTING:", route);
+      const initialRoute = route;
+      console.log("MESSAGE_ROUTING chosenRoute:", route);
 
-      // Multi-file edit: generate proposal via LLM
-      if (route.action === "multi_file_edit") {
-        setStatusLine("Generating multi-file proposalâ€¦");
+      const isEditRoute =
+        route.action === "multi_file_edit" ||
+        route.action === "file_edit_auto_search" ||
+        route.action === "file_open" ||
+        route.action === "file_edit";
+      if (provider === "local" && isEditRoute) {
         try {
+          const status = await getRuntimeStatus();
+          if (!status.running) {
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `a-${Date.now()}`,
+                role: "assistant",
+                text: "Local model not running. Click Start Runtime.",
+              },
+            ]);
+            return;
+          }
+        } catch {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `a-${Date.now()}`,
+              role: "assistant",
+              text: "Local model not running. Click Start Runtime.",
+            },
+          ]);
+          return;
+        }
+      }
+
+      const runId = `run-${Date.now()}`;
+      const { token } = createRun(runId);
+      setCurrentRunId(runId);
+      registerRunToken(runId, token);
+      setLastRunFailed(false);
+      emitStep("intent", `Route: ${route.action}`, { action: route.action });
+
+      // Multi-file edit: generate proposal via LLM (with explicit targetFiles when from route.targetHints)
+      if (route.action === "multi_file_edit") {
+        setStatusLine("Generating multi-file proposal…");
+        emitStep("plan", "Generating multi-file proposal…");
+        let stopHeartbeat: (() => void) | undefined;
+        try {
+          throwIfCancelled(runId, token);
           setFileEditState(null);
           const inspector = new ProjectInspector(workspace);
-          const m = manifest ?? (await inspector.buildManifest());
+          const m = manifest ?? (await raceWithCancel(runId, token, inspector.buildManifest()));
+          throwIfCancelled(runId, token);
           if (!manifest) setManifest(m);
           const manifestSummary = m
             ? `Types: ${m.projectTypes.join(", ")}; Config: ${m.configFiles.slice(0, 8).join(", ")}; Files: ${m.fileList.slice(0, 30).join(", ")}`
             : undefined;
-          const hintPaths = "targetHints" in route && route.targetHints ? route.targetHints : [];
+          // Resolve targetHints relative to workspace root (explicit targetFiles from intent)
+          const rawHints = "targetHints" in route && route.targetHints ? route.targetHints : [];
+          const hintPaths = rawHints.map((h: string) => (h.startsWith("/") || /^[a-zA-Z]:/.test(h) ? h : h.replace(/^\.\/+/, "")));
+          console.log("MESSAGE_ROUTING multi_file_edit targetFiles (resolved)", hintPaths);
           const contextPaths = hintPaths.length > 0
             ? hintPaths.slice(0, 5)
             : selectedPaths.length > 0
@@ -590,17 +811,29 @@ export default function App() {
           const contextFiles: { path: string; content: string }[] = [];
           for (const path of contextPaths) {
             try {
-              const content = await workspace.readFile(path);
+              const content = await raceWithCancel(runId, token, workspace.readFile(path));
               contextFiles.push({ path, content });
             } catch {
               /* skip */
             }
           }
-          const proposal = await generateMultiFileProposal({
-            userPrompt: route.instructions,
-            contextFiles,
-            manifestSummary,
-          });
+          throwIfCancelled(runId, token);
+          stopHeartbeat = startProgressHeartbeat("plan", "Generating multi-file proposal…");
+          let proposal: Awaited<ReturnType<typeof generateMultiFileProposal>> | null = null;
+          try {
+            proposal = await raceWithCancel(
+              runId,
+              token,
+              raceWithTimeout("plan", PLANNING_TIMEOUT_MS, generateMultiFileProposal({
+                userPrompt: route.instructions,
+                contextFiles,
+                manifestSummary,
+              }), token)
+            );
+          } finally {
+            stopHeartbeat?.();
+            stopHeartbeat = undefined;
+          }
           if (proposal && proposal.files.length > 0) {
             const included: Record<string, boolean> = {};
             const verifiedFiles = await Promise.all(
@@ -655,6 +888,10 @@ export default function App() {
               ]);
               return;
             }
+            emitStep("diff", "Multi-file proposal ready.");
+            emitStep("ready", "Ready.");
+            unregisterRunToken();
+            setCurrentRunId(null);
             setShowDiffPanel(true);
             setMessages((prev) => [
               ...prev,
@@ -665,16 +902,291 @@ export default function App() {
               },
             ]);
           } else {
+            emitStep("search", "Searching for candidate files…");
+            throwIfCancelled(runId, token);
+            stopHeartbeat = startProgressHeartbeat("search", "Searching for candidate files…");
+            let bestMatches: { path: string; confidence: number }[] = [];
+            try {
+              bestMatches = await searchFilesForEdit(
+                route.instructions,
+                root,
+                (wr, name) => workspace.searchFilesByName(wr, name),
+                m?.fileList,
+                runId,
+                token
+              );
+            } finally {
+              stopHeartbeat?.();
+            }
+            const top3 = bestMatches.slice(0, 3).map((c) => c.path);
+            setLastFileChoiceCandidates(top3);
+            const intro = "I can do that — I just need to know where to make the change.";
+            const body = top3.length > 0
+              ? "\n\n" + top3.map((path, i) => `${i + 1}. ${path}`).join("\n") + "\n\nReply with 1, 2, or 3."
+              : "\n\nWhich file should I change? You can open the file and tell me what to edit.";
             setMessages((prev) => [
               ...prev,
-              { id: `a-${Date.now()}`, role: "assistant", text: "Could not generate proposal. Try being more specific about which files to change." },
+              {
+                id: `a-${Date.now()}`,
+                role: "assistant",
+                text: intro + body,
+              },
             ]);
           }
         } catch (e) {
-          console.error("generateMultiFileProposal error:", e);
+          runtimeCancelRun(runId);
+          if (e instanceof CancelledError) {
+            setStatusLine(null);
+            unregisterRunToken();
+            return;
+          }
+          if (e instanceof TimeoutError) {
+            setLastRunFailed(true);
+            emitStep("fail", `${e.phase} timed out (${e.ms}ms)`, {}, "error");
+            setMessages((prev) => [
+              ...prev,
+              { id: `a-${Date.now()}`, role: "assistant", text: "Multi-file proposal timed out. Retry?" },
+            ]);
+          } else {
+            console.error("generateMultiFileProposal error:", e);
+            setLastRunFailed(true);
+            emitStep("fail", `Error: ${String(e)}`, {}, "error");
+            setMessages((prev) => [
+              ...prev,
+              { id: `a-${Date.now()}`, role: "assistant", text: `Error: ${String(e)}` },
+            ]);
+          }
+          unregisterRunToken();
+          setCurrentRunId(null);
+          setStatusLine(null);
+          return;
+        } finally {
+          stopHeartbeat?.();
+          setStatusLine(null);
+        }
+      }
+
+      // Plain-English: edit intent but no file named -> auto-search, then high confidence = diff, low = ask to pick
+      if (route.action === "file_edit_auto_search") {
+        setStatusLine("Searching for relevant file…");
+        emitStep("search", "Searching repo…");
+        let stopHeartbeatSearch: (() => void) | undefined;
+        try {
+          throwIfCancelled(runId, token);
+          const inspector = new ProjectInspector(workspace);
+          const m = manifest ?? (await raceWithCancel(runId, token, inspector.buildManifest()));
+          throwIfCancelled(runId, token);
+          if (!manifest) setManifest(m);
+          stopHeartbeatSearch = startProgressHeartbeat("search", "Searching repo…");
+          let candidates: { path: string; confidence: number }[];
+          try {
+            candidates = await searchFilesForEdit(
+              route.instructions,
+              root,
+              (wr, name) => workspace.searchFilesByName(wr, name),
+              m?.fileList,
+              runId,
+              token
+            );
+          } finally {
+            stopHeartbeatSearch?.();
+          }
+          throwIfCancelled(runId, token);
+          const resolvedTargets = candidates.map((c) => c.path);
+          const topConfidence = candidates[0]?.confidence ?? 0;
+          emitStep("targets", `Candidates: ${resolvedTargets.slice(0, 3).join(", ")}`, {
+            paths: resolvedTargets.slice(0, 5),
+            confidence: topConfidence,
+          });
+          console.log("MESSAGE_ROUTING file_edit_auto_search", {
+            detectedIntent: "file_edit_search",
+            resolvedTargets,
+            confidence: topConfidence,
+            finalRoute: "file_edit_auto_search",
+          });
+          if (candidates.length === 0) {
+            emitStep("fail", "No matching files found.");
+            unregisterRunToken();
+            setCurrentRunId(null);
+            setMessages((prev) => [
+              ...prev,
+              { id: `a-${Date.now()}`, role: "assistant", text: "I couldn't find any files that match. Try naming the file (e.g. \"edit README.md: add a section\")." },
+            ]);
+            setStatusLine(null);
+            return;
+          }
+          const top = candidates[0];
+          const second = candidates[1];
+          const highConfidence =
+            top.confidence >= HIGH_CONFIDENCE_THRESHOLD &&
+            (!second || top.confidence - second.confidence >= 0.2);
+          if (highConfidence) {
+            const resolveOne = async (hint: string) =>
+              readProjectFile(
+                root,
+                hint,
+                (path) => workspace.readFile(path),
+                (path) => workspace.exists(path),
+                (wr, name) => workspace.searchFilesByName(wr, name)
+              );
+            const result = await raceWithCancel(runId, token, resolveOne(top.path));
+            throwIfCancelled(runId, token);
+            if ("error" in result && result.error !== "multiple") {
+              emitStep("fail", `${top.path} not found.`);
+              unregisterRunToken();
+              setCurrentRunId(null);
+              setMessages((prev) => [
+                ...prev,
+                { id: `a-${Date.now()}`, role: "assistant", text: `${result.path} not found.` },
+              ]);
+              setStatusLine(null);
+              return;
+            }
+            const resolvedPath = "content" in result ? result.path : (result as { path: string }).path;
+            const originalContent = "content" in result ? result.content : "";
+            emitStep("diff", "Generating edit proposal…", { path: resolvedPath });
+            setStatusLine("Generating edit proposal…");
+            throwIfCancelled(runId, token);
+            let stopHeartbeatDiff: (() => void) | undefined;
+            let editResult: { proposedContent: string; plan: string[]; usedModel: boolean };
+            try {
+              stopHeartbeatDiff = startProgressHeartbeat("diff", "Generating edit proposal…");
+              editResult = await raceWithCancel(
+                runId,
+                token,
+                raceWithTimeout("diff", DIFF_GENERATION_TIMEOUT_MS, generateFileEdit({
+                  filePath: resolvedPath,
+                  originalContent,
+                  instructions: route.instructions,
+                  isNewFile: false,
+                  runId,
+                }), token)
+              );
+            } finally {
+              stopHeartbeatDiff?.();
+            }
+            const diff = computeDiffLines(originalContent, editResult.proposedContent);
+            const files: PendingEditFile[] = [
+              { path: resolvedPath, original: originalContent, proposed: editResult.proposedContent, diff },
+            ];
+            throwIfCancelled(runId, token);
+            let stopHeartbeatValidate: (() => void) | undefined = startProgressHeartbeat("validate", "Validating proposal…");
+            try {
+              const singleGroundTruth = buildProposalGroundTruth(
+                files.map((f) => ({ path: f.path, original: f.original, proposed: f.proposed, exists: true }))
+              );
+              const summaryRaw = await raceWithCancel(
+                runId,
+                token,
+                raceWithTimeout("validate", VALIDATION_TIMEOUT_MS, generateProposalSummary({
+                  type: "grounded",
+                  groundTruth: singleGroundTruth,
+                  plan: [route.instructions.slice(0, 200)],
+                }), token)
+              );
+              const getSingleProposed = (path: string) => files.find((f) => f.path === path)?.proposed ?? "";
+              const summary = summaryRaw
+                ? validateAndFixSummary(summaryRaw, {
+                    groundTruth: singleGroundTruth,
+                    getProposedContent: getSingleProposed,
+                  })
+                : null;
+              const pending: PendingEdit = {
+                id: `pe-${Date.now()}`,
+                files,
+                instructions: route.instructions,
+                createdAt: Date.now(),
+                selectedIndex: 0,
+                summary: summary ?? undefined,
+              };
+              const singleEntry: ProposalEntry = {
+                id: pending.id,
+                type: "single",
+                fileCount: 1,
+                createdAt: Date.now(),
+                status: "pending",
+                pendingEdit: pending,
+              };
+              if (addProposalToStackWithConfirm(singleEntry)) {
+                emitStep("validate", "Proposal ready.");
+                emitStep("ready", "Ready.");
+                unregisterRunToken();
+                setCurrentRunId(null);
+                setFileEditState(null);
+                setMessages((prev) => [
+                  ...prev,
+                  { id: `a-${Date.now()}`, role: "assistant", text: "Edit plan for 1 file. Review diff and Apply or Cancel." },
+                ]);
+                setShowDiffPanel(true);
+              }
+            } catch (e) {
+              runtimeCancelRun(runId);
+              if (e instanceof CancelledError) {
+                setStatusLine(null);
+                unregisterRunToken();
+                return;
+              }
+              if (e instanceof TimeoutError) {
+                setLastRunFailed(true);
+                emitStep("fail", `${e.phase} timed out`, {}, "error");
+                setMessages((prev) => [
+                  ...prev,
+                  { id: `a-${Date.now()}`, role: "assistant", text: "Patch generation timed out. Retry?" },
+                ]);
+              } else {
+                console.error("generateFileEdit error (auto-search)", e);
+                setLastRunFailed(true);
+                emitStep("fail", `Error: ${String(e)}`, {}, "error");
+                setMessages((prev) => [
+                  ...prev,
+                  { id: `a-${Date.now()}`, role: "assistant", text: `Error: ${String(e)}` },
+                ]);
+              }
+              unregisterRunToken();
+              setCurrentRunId(null);
+              setStatusLine(null);
+              return;
+            } finally {
+              stopHeartbeatValidate?.();
+            }
+            if (!isActiveRun(runId, token)) return;
+            setStatusLine(null);
+            return;
+          }
+          if (!isActiveRun(runId, token)) return;
+          emitStep("targets", "Asking which file (low confidence).", {
+            paths: candidates.slice(0, 3).map((c) => c.path),
+          });
+          unregisterRunToken();
+          const top3 = candidates.slice(0, 3).map((c) => c.path);
+          setLastFileChoiceCandidates(top3);
+          const intro = "I can do that — I just need to know where to make the change.";
+          const body = top3.length > 0
+            ? "\n\n" + top3.map((path, i) => `${i + 1}. ${path}`).join("\n") + "\n\nReply with 1, 2, or 3."
+            : "\n\nWhich file should I change? You can open the file and tell me what to edit.";
           setMessages((prev) => [
             ...prev,
-            { id: `a-${Date.now()}`, role: "assistant", text: `Error: ${String(e)}` },
+            {
+              id: `a-${Date.now()}`,
+              role: "assistant",
+              text: intro + body,
+            },
+          ]);
+        } catch (e) {
+          runtimeCancelRun(runId);
+          if (e instanceof CancelledError) {
+            setStatusLine(null);
+            unregisterRunToken();
+            return;
+          }
+          console.error("file_edit_auto_search", e);
+          setLastRunFailed(true);
+          emitStep("fail", `Error: ${String(e)}`, {}, "error");
+          unregisterRunToken();
+          setCurrentRunId(null);
+          setMessages((prev) => [
+            ...prev,
+            { id: `a-${Date.now()}`, role: "assistant", text: `Error searching: ${String(e)}` },
           ]);
         } finally {
           setStatusLine(null);
@@ -682,8 +1194,10 @@ export default function App() {
         return;
       }
 
+      // OPEN intent: directly open the requested file (bypass proposal generation). EDIT intent: resolve targetFiles then generate edit proposal.
       if (route.action === "file_open" || route.action === "file_edit") {
         const isEdit = route.action === "file_edit";
+        emitStep("targets", `Resolving: ${isEdit ? route.targets?.join(", ") : route.targetPath ?? ""}`);
         const hints = isEdit ? route.targets : [route.targetPath];
 
         const resolveOne = async (hint: string) =>
@@ -701,9 +1215,10 @@ export default function App() {
         const resolved: { path: string; content: string; isNewFile: boolean }[] = [];
         for (const hint of hints) {
           const result = await resolveOne(hint);
-          if ("error" in result && result.error === "multiple") {
-            const list = result.candidates.map((path, i) => `${i + 1}. ${path}`).join("\n");
+          if ("error" in result && result.error === "multiple" && "candidates" in result) {
+            const list = result.candidates.map((path: string, i: number) => `${i + 1}. ${path}`).join("\n");
             setLastFileChoiceCandidates(result.candidates);
+            unregisterRunToken();
             setMessages((prev) => [
               ...prev,
               { id: `a-${Date.now()}`, role: "assistant", text: `Which file for "${hint}"?\n${list}\n\nReply with a number.` },
@@ -715,6 +1230,7 @@ export default function App() {
             if (isCreateRequest) {
               resolved.push({ path: result.path, content: "", isNewFile: true });
             } else {
+              unregisterRunToken();
               setMessages((prev) => [
                 ...prev,
                 { id: `a-${Date.now()}`, role: "assistant", text: `${result.path} not found.` },
@@ -726,29 +1242,78 @@ export default function App() {
           }
         }
 
+        const resolvedFiles = resolved.map((r) => r.path);
+        console.log("MESSAGE_ROUTING resolvedTargets:", resolvedFiles, isEdit ? "(edit)" : "(open)");
+        emitStep("targets", `Resolved: ${resolvedFiles.join(", ")}`);
         const first = resolved[0];
         const resolvedPath = first.path;
         const originalText = first.content;
         const diffRequest = hasDiffRequest(p);
+        const resolvedForPatch =
+          diffRequest && !impliesMultiFile(p) ? resolved.slice(0, 1) : resolved;
 
         if (diffRequest) {
-          setStatusLine("Generating patchâ€¦");
+          setStatusLine("Generating patch…");
+          emitStep("plan", "Generating patch…");
+          let stopHeartbeatPlan: (() => void) | undefined;
           try {
+            throwIfCancelled(runId, token);
             setFileEditState(null);
-            setSelectedPaths(resolved.map((r) => r.path));
+            setSelectedPaths(resolvedForPatch.map((r) => r.path));
             const inspector = new ProjectInspector(workspace);
-            const m = manifest ?? (await inspector.buildManifest());
+            const m = manifest ?? (await raceWithCancel(runId, token, inspector.buildManifest()));
+            throwIfCancelled(runId, token);
             if (!manifest) setManifest(m);
             const ctxBuilder = new ContextBuilder(workspace, m);
             const knowledgeStore = useKnowledgePacks ? new KnowledgeStore(root, workspace) : null;
-            const ctx = await ctxBuilder.build(p, resolved.map((r) => r.path), {
-              useKnowledge: useKnowledgePacks,
-              knowledgeStore: knowledgeStore ?? undefined,
-              agentRole: "coder",
-              projectSnapshot: projectSnapshot ?? undefined,
-              enabledPacks: enabledPacks.length ? enabledPacks : undefined,
-            });
-            const patchResult = await generatePlanAndPatch(ctx);
+            const ctx = await raceWithCancel(
+              runId,
+              token,
+              ctxBuilder.build(p, resolvedForPatch.map((r) => r.path), {
+                useKnowledge: useKnowledgePacks,
+                knowledgeStore: knowledgeStore ?? undefined,
+                agentRole: "coder",
+                projectSnapshot: projectSnapshot ?? undefined,
+                enabledPacks: enabledPacks.length ? enabledPacks : undefined,
+              })
+            );
+            throwIfCancelled(runId, token);
+            if (!isActiveRun(runId, token)) return;
+            const patchCtx = { ...ctx, runId };
+            stopHeartbeatPlan = startProgressHeartbeat("diff", "Generating patch…");
+            const runPatch = () =>
+              raceWithTimeout("diff", PLAN_AND_EDIT_PLAN_TIMEOUT_MS, generatePlanAndPatch(patchCtx), token);
+            let patchResult: PlanAndPatch;
+            try {
+              patchResult = await raceWithCancel(runId, token, runPatch());
+            } catch (firstErr) {
+              if (firstErr instanceof TimeoutError && isActiveRun(runId, token)) {
+                try {
+                  patchResult = await raceWithCancel(runId, token, runPatch());
+                } catch {
+                  throw firstErr;
+                }
+              } else {
+                throw firstErr;
+              }
+            } finally {
+              stopHeartbeatPlan?.();
+            }
+            if (!isActiveRun(runId, token)) return;
+            const MAX_DIFF_LINES = 400;
+            const MAX_DIFF_CHARS = 25_000;
+            const patchLines = patchResult.patch.split(/\r?\n/);
+            if (patchLines.length > MAX_DIFF_LINES || patchResult.patch.length > MAX_DIFF_CHARS) {
+              const capped =
+                patchLines.length > MAX_DIFF_LINES
+                  ? patchLines.slice(0, MAX_DIFF_LINES).join("\n")
+                  : patchResult.patch.slice(0, MAX_DIFF_CHARS);
+              patchResult = {
+                ...patchResult,
+                partialDiff: true,
+                cappedPatch: capped,
+              };
+            }
             setPlanAndPatch(patchResult);
             const engine = new PatchEngine(root, (path) => workspace.readFile(path));
             const preview = await engine.preview(patchResult.patch);
@@ -759,20 +1324,55 @@ export default function App() {
             setAppState("patchProposed");
             setShowDiffPanel(true);
             const store = new MemoryStore(root);
-            const record = await store.addProposedSession(p, resolved.map((r) => r.path), patchResult.explanation, patchResult.patch);
+            const record = await store.addProposedSession(p, resolvedForPatch.map((r) => r.path), patchResult.explanation, patchResult.patch);
             setCurrentProposedSessionId(record.id);
             await fetchSessionsAndResume();
+            emitStep("diff", "Patch ready.");
+            emitStep("ready", "Ready.");
+            unregisterRunToken();
+            setCurrentRunId(null);
+            const partialNote = patchResult.partialDiff
+              ? "\n\nChange is large; showing partial diff. Use 'apply' to write full change."
+              : "";
             setMessages((prev) => [
               ...prev,
-              { id: `a-${Date.now()}`, role: "assistant", text: `Patch for ${resolvedPath}: ${patchResult.explanation}` },
+              {
+                id: `a-${Date.now()}`,
+                role: "assistant",
+                text: patchResult.fallbackDiff
+                  ? "I couldn't format the diff correctly, but I can still apply the change safely. Here's the preview."
+                  : `Patch for ${resolvedPath}: ${patchResult.explanation}${partialNote}`,
+              },
             ]);
           } catch (e) {
-            console.error("sendChatMessage patch", e);
-            setMessages((prev) => [
-              ...prev,
-              { id: `a-${Date.now()}`, role: "assistant", text: `Error: ${String(e)}` },
-            ]);
+            runtimeCancelRun(runId);
+            if (e instanceof CancelledError) {
+              setStatusLine(null);
+              unregisterRunToken();
+              return;
+            }
+            if (e instanceof TimeoutError) {
+              setLastRunFailed(true);
+              emitStep("fail", "Patch timed out.", {}, "error");
+              setMessages((prev) => [
+                ...prev,
+                { id: `a-${Date.now()}`, role: "assistant", text: "Patch timed out (plan + edit plan: 120s). Try smaller change or Stop and retry." },
+              ]);
+            } else {
+              console.error("sendChatMessage patch", e);
+              setLastRunFailed(true);
+              emitStep("fail", `Error: ${String(e)}`, {}, "error");
+              setMessages((prev) => [
+                ...prev,
+                { id: `a-${Date.now()}`, role: "assistant", text: `Error: ${String(e)}` },
+              ]);
+            }
+            unregisterRunToken();
+            setCurrentRunId(null);
+            setStatusLine(null);
+            return;
           } finally {
+            stopHeartbeatPlan?.();
             setStatusLine(null);
           }
           return;
@@ -781,21 +1381,33 @@ export default function App() {
         const targets = resolved.map((r) => r.path);
         if (isEdit && route.instructions) {
           setStatusLine("Generating edit proposalâ€¦");
+          emitStep("diff", "Generating edit proposal…");
+          let stopHeartbeatEdit: (() => void) | undefined;
           try {
+            throwIfCancelled(runId, token);
             const files: PendingEditFile[] = [];
             for (const r of resolved) {
-              // Use model-based generation for complex edits
-              const editResult = await generateFileEdit({
-                filePath: r.path,
-                originalContent: r.content,
-                instructions: route.instructions,
-                isNewFile: r.isNewFile,
-              });
+              throwIfCancelled(runId, token);
+              stopHeartbeatEdit = startProgressHeartbeat("diff", "Generating edit proposal…");
+              try {
+              const editResult = await raceWithCancel(
+                runId,
+                token,
+                raceWithTimeout("diff", DIFF_GENERATION_TIMEOUT_MS, generateFileEdit({
+                  filePath: r.path,
+                  originalContent: r.content,
+                  instructions: route.instructions,
+                  isNewFile: r.isNewFile,
+                  runId,
+                }), token)
+              );
               const diff = computeDiffLines(r.content, editResult.proposedContent);
               files.push({ path: r.path, original: r.content, proposed: editResult.proposedContent, diff });
+              } finally {
+                stopHeartbeatEdit?.();
+              }
             }
             const peId = `pe-${Date.now()}`;
-            const firstFile = files[0];
             setStatusLine("Generating summaryâ€¦");
             const singleGroundTruth = buildProposalGroundTruth(
               files.map((f, i) => ({
@@ -805,11 +1417,16 @@ export default function App() {
                 exists: !resolved[i]?.isNewFile,
               }))
             );
-            const summaryRaw = await generateProposalSummary({
-              type: "grounded",
-              groundTruth: singleGroundTruth,
-              plan: [route.instructions.slice(0, 200)],
-            });
+            throwIfCancelled(runId, token);
+            const summaryRaw = await raceWithCancel(
+              runId,
+              token,
+              raceWithTimeout("validate", VALIDATION_TIMEOUT_MS, generateProposalSummary({
+                type: "grounded",
+                groundTruth: singleGroundTruth,
+                plan: [route.instructions.slice(0, 200)],
+              }), token)
+            );
             const getSingleProposed = (path: string) => files.find((f) => f.path === path)?.proposed ?? "";
             const summary = summaryRaw
               ? validateAndFixSummary(summaryRaw, {
@@ -835,6 +1452,7 @@ export default function App() {
               pendingEdit: pending,
             };
             if (!addProposalToStackWithConfirm(singleEntry)) {
+              unregisterRunToken();
               setMessages((prev) => [
                 ...prev,
                 { id: `a-${Date.now()}`, role: "assistant", text: "Proposal not added (stack full). Discard one to make room." },
@@ -851,18 +1469,46 @@ export default function App() {
                 text: `Edit plan for ${files.length} file(s)${newFileNote}. Review diff and Apply or Cancel.`,
               },
             ]);
+            emitStep("ready", "Ready.");
+            unregisterRunToken();
+            setCurrentRunId(null);
             setShowDiffPanel(true);
             console.log("OPEN_EDITOR", { pendingFiles: files.length });
           } catch (e) {
-            console.error("generateFileEdit error:", e);
-            setMessages((prev) => [
-              ...prev,
-              { id: `a-${Date.now()}`, role: "assistant", text: `Error generating edit: ${String(e)}` },
-            ]);
+            runtimeCancelRun(runId);
+            if (e instanceof CancelledError) {
+              setStatusLine(null);
+              unregisterRunToken();
+              return;
+            }
+            if (e instanceof TimeoutError) {
+              setLastRunFailed(true);
+              emitStep("fail", `${e.phase} timed out`, {}, "error");
+              setMessages((prev) => [
+                ...prev,
+                { id: `a-${Date.now()}`, role: "assistant", text: "Patch generation timed out. Retry?" },
+              ]);
+            } else {
+              console.error("generateFileEdit error:", e);
+              setLastRunFailed(true);
+              emitStep("fail", `Error: ${String(e)}`, {}, "error");
+              setMessages((prev) => [
+                ...prev,
+                { id: `a-${Date.now()}`, role: "assistant", text: `Error: ${String(e)}` },
+              ]);
+            }
+            unregisterRunToken();
+            setCurrentRunId(null);
+            setStatusLine(null);
+            return;
           } finally {
+            stopHeartbeatEdit?.();
             setStatusLine(null);
           }
         } else {
+          emitStep("ready", "Opened file(s).");
+          unregisterRunToken();
+          setCurrentRunId(null);
           const assistantMsg =
             targets.length > 1 ? `Opened: ${targets.join(", ")}` : `Opened: ${resolvedPath}`;
           setMessages((prev) => [
@@ -885,41 +1531,103 @@ export default function App() {
         return;
       }
 
-      // ROUTING: chat (no file action)
+      // ROUTING: chat only when initial intent was chat (never fallback from EDIT)
+      if (initialRoute.action !== "chat") {
+        return;
+      }
       console.log("MESSAGE_ROUTING: chat");
-      setStatusLine("Generating replyâ€¦");
+      setStatusLine("Generating reply…");
+      emitStep("plan", "Generating reply…");
+      let stopHeartbeatChat: (() => void) | undefined;
+      let streamMsgId: string | null = null;
       try {
+        throwIfCancelled(runId, token);
         const inspector = new ProjectInspector(workspace);
-        const m = manifest ?? (await inspector.buildManifest());
+        const m = manifest ?? (await raceWithCancel(runId, token, inspector.buildManifest()));
+        throwIfCancelled(runId, token);
         if (!manifest) setManifest(m);
         const ctxBuilder = new ContextBuilder(workspace, m);
         const knowledgeStore = useKnowledgePacks ? new KnowledgeStore(root, workspace) : null;
-        const ctx = await ctxBuilder.build(p, selectedPaths, {
-          useKnowledge: useKnowledgePacks,
-          knowledgeStore: knowledgeStore ?? undefined,
-          agentRole: "coder",
-          projectSnapshot: projectSnapshot ?? undefined,
-          enabledPacks: enabledPacks.length ? enabledPacks : undefined,
-        });
+        const ctx = await raceWithCancel(
+          runId,
+          token,
+          ctxBuilder.build(p, selectedPaths, {
+            useKnowledge: useKnowledgePacks,
+            knowledgeStore: knowledgeStore ?? undefined,
+            agentRole: "coder",
+            projectSnapshot: projectSnapshot ?? undefined,
+            enabledPacks: enabledPacks.length ? enabledPacks : undefined,
+          })
+        );
+        throwIfCancelled(runId, token);
+        if (!isActiveRun(runId, token)) return;
+        const chatCtx = { ...ctx, runId };
         setLastRetrievedChunks(
-          ctx.knowledgeChunks?.map((c) => ({
+          chatCtx.knowledgeChunks?.map((c) => ({
             title: c.title,
             sourcePath: c.sourcePath,
             chunkText: c.chunkText,
           })) ?? []
         );
-        const text = await generateChatResponse(ctx);
-        setMessages((prev) => [
-          ...prev,
-          { id: `a-${Date.now()}`, role: "assistant", text },
-        ]);
+        stopHeartbeatChat = startProgressHeartbeat("plan", "Generating reply…");
+        streamMsgId = `a-${Date.now()}`;
+        streamingMessageIdRef.current = streamMsgId;
+        currentStreamRunIdRef.current = runId;
+        setMessages((prev) => [...prev, { id: streamMsgId!, role: "assistant", text: "" }]);
+        let text: string;
+        try {
+          text = await raceWithCancel(
+            runId,
+            token,
+            raceWithTimeout("plan", PLANNING_TIMEOUT_MS, generateChatResponse(chatCtx), token)
+          );
+        } finally {
+          stopHeartbeatChat?.();
+          streamingMessageIdRef.current = null;
+          currentStreamRunIdRef.current = null;
+        }
+        if (!isActiveRun(runId, token)) return;
+        emitStep("ready", "Reply ready.");
+        unregisterRunToken();
+        setCurrentRunId(null);
+        setMessages((prev) =>
+          prev.map((m) => (m.id === streamMsgId ? { ...m, text: text || m.text } : m))
+        );
       } catch (e) {
-        console.error("sendChatMessage", e);
-        setMessages((prev) => [
-          ...prev,
-          { id: `a-${Date.now()}`, role: "assistant", text: `Error: ${String(e)}` },
-        ]);
+        runtimeCancelRun(runId);
+        streamingMessageIdRef.current = null;
+        currentStreamRunIdRef.current = null;
+        if (e instanceof CancelledError) {
+          setStatusLine(null);
+          unregisterRunToken();
+          if (streamMsgId) {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === streamMsgId ? { ...m, text: "Cancelled" } : m))
+            );
+          }
+          return;
+        }
+        if (e instanceof TimeoutError) {
+          setLastRunFailed(true);
+          emitStep("fail", `${e.phase} timed out`, {}, "error");
+          setMessages((prev) => [
+            ...prev,
+            { id: `a-${Date.now()}`, role: "assistant", text: "Reply timed out. Retry?" },
+          ]);
+        } else {
+          console.error("sendChatMessage", e);
+          setLastRunFailed(true);
+          emitStep("fail", `Error: ${String(e)}`, {}, "error");
+          setMessages((prev) => [
+            ...prev,
+            { id: `a-${Date.now()}`, role: "assistant", text: `Error: ${String(e)}` },
+          ]);
+        }
+        unregisterRunToken();
+        setCurrentRunId(null);
+        setStatusLine(null);
       } finally {
+        stopHeartbeatChat?.();
         setStatusLine(null);
       }
     },
@@ -1019,13 +1727,13 @@ export default function App() {
                   planner: new LocalPlannerAgent(
                     () => localSettingsRef.current,
                     () => toolRootRef.current,
-                    () => portRef.current ?? 11435,
+                    () => portRef.current ?? 8080,
                     () => ({})
                   ),
                   reviewer: new LocalReviewerAgent(
                     () => localSettingsRef.current,
                     () => toolRootRef.current,
-                    () => portRef.current ?? 11435,
+                    () => portRef.current ?? 8080,
                     () => ({})
                   ),
                 }
@@ -1080,7 +1788,9 @@ export default function App() {
         };
         await writeProjectSnapshot(root, snapshot).catch(() => {});
         setProjectSnapshot(snapshot);
-        await writeWorkspaceSettings(root, { autoPacksEnabled, enabledPacks: next, devMode, modelPath, port }).catch(() => {});
+        readWorkspaceSettings(root).then((s) =>
+          writeWorkspaceSettings(root, { ...s, autoPacksEnabled, enabledPacks: next, devMode, modelPath, port }).catch(() => {})
+        );
       }
     },
     [projectSnapshot, autoPacksEnabled, devMode, modelPath, port]
@@ -1091,7 +1801,9 @@ export default function App() {
       setAutoPacksEnabled(value);
       const root = workspace.root;
       if (root) {
-        writeWorkspaceSettings(root, { autoPacksEnabled: value, enabledPacks, devMode, modelPath, port }).catch(() => {});
+        readWorkspaceSettings(root).then((s) =>
+          writeWorkspaceSettings(root, { ...s, autoPacksEnabled: value, enabledPacks, devMode, modelPath, port }).catch(() => {})
+        );
       }
     },
     [enabledPacks, devMode, modelPath, port]
@@ -1102,11 +1814,133 @@ export default function App() {
       setDevMode(mode);
       const root = workspace.root;
       if (root) {
-        writeWorkspaceSettings(root, { autoPacksEnabled, enabledPacks, devMode: mode, modelPath, port }).catch(() => {});
+        readWorkspaceSettings(root).then((s) =>
+          writeWorkspaceSettings(root, { ...s, autoPacksEnabled, enabledPacks, devMode: mode, modelPath, port }).catch(() => {})
+        );
       }
     },
     [autoPacksEnabled, enabledPacks, modelPath, port]
   );
+
+  const handleLivePaneToggle = useCallback(async () => {
+    const root = workspace.root;
+    setLivePaneOpen((prev) => {
+      const next = !prev;
+      if (root) {
+        readWorkspaceSettings(root).then((s) =>
+          writeWorkspaceSettings(root, { ...s, livePaneOpen: next }).catch(() => {})
+        );
+      }
+      return next;
+    });
+  }, []);
+
+  const handleRetry = useCallback(() => {
+    const lastUser = messages.filter((m) => m.role === "user").pop();
+    if (lastUser?.text) sendChatMessage(lastUser.text);
+    setLastRunFailed(false);
+  }, [messages, sendChatMessage]);
+
+  const pollRuntimeStatus = useCallback(async () => {
+    try {
+      const status = await getRuntimeStatus();
+      if (status.running && status.port != null) {
+        setRuntimeStatus("Ready");
+        setRuntimePort(status.port);
+        setPort(status.port);
+        try {
+          const code = await runtimeHealthCheckStatus(status.port);
+          setRuntimeHealthStatusText(String(code));
+        } catch {
+          setRuntimeHealthStatusText("connection failed");
+        }
+        try {
+          const lines = await getRuntimeLog();
+          setRuntimeLogLines(lines);
+        } catch {
+          /* ignore */
+        }
+      } else {
+        setRuntimeStatus("Down");
+        setRuntimePort(null);
+        setRuntimeHealthStatusText(null);
+        setRuntimeLogLines((prev) => (prev.length > 0 ? prev : []));
+      }
+    } catch {
+      setRuntimeStatus("Down");
+      setRuntimePort(null);
+      setRuntimeHealthStatusText(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (provider !== "local" || !livePaneOpen) return;
+    const t = setInterval(pollRuntimeStatus, 2000);
+    return () => clearInterval(t);
+  }, [provider, livePaneOpen, pollRuntimeStatus]);
+
+  const handleStartRuntime = useCallback(async () => {
+    setRuntimeSpawnError(null);
+    setRuntimeStatus("Starting");
+    let toolRootGlobal = "";
+    let modelPathAbs: string | null = null;
+    try {
+      await workspace.ensureGlobalToolDirs();
+      toolRootGlobal = await getGlobalToolRoot();
+      modelPathAbs = await scanGlobalModelsGGUF();
+      if (!modelPathAbs?.trim()) {
+        setRuntimeSpawnError("No .gguf model found in %LOCALAPPDATA%\\DevAssistantCursorLite\\tools\\models. Add a model (e.g. q4_k_m) or download one.");
+        setRuntimeStatus("Down");
+        return;
+      }
+      // Pass null so backend uses LLAMA_PORT/8080 or next free port if busy
+      const result = await runtimeStart(
+        modelPathAbs,
+        toolRootGlobal,
+        {
+          temperature: localSettings.temperature,
+          top_p: localSettings.top_p,
+          max_tokens: localSettings.max_tokens,
+          context_length: localSettings.context_length,
+        },
+        null,
+        null
+      );
+      setRuntimePort(result.port);
+      setPort(result.port);
+      setRuntimeStatus("Ready");
+      setRuntimeHealthStatusText("200");
+      setToolRoot((prev) => prev || toolRootGlobal);
+      setHasLlamaAtToolRoot(true);
+      setLocalSettings((prev) => ({ ...prev, ggufPath: modelPathAbs! }));
+      await pollRuntimeStatus();
+    } catch (e) {
+      const msg = String(e);
+      const exePath = toolRootGlobal
+        ? `${toolRootGlobal.replace(/\/+$/, "")}/runtime/llama/llama-server.exe`
+        : "%LOCALAPPDATA%\\DevAssistantCursorLite\\tools\\runtime\\llama\\llama-server.exe";
+      setRuntimeSpawnError(`exe: ${exePath}\nmodel: ${modelPathAbs ?? "?"}\nport: 8080 (or next free)\nerror: ${msg}`);
+      setRuntimeStatus("Down");
+    }
+  }, [localSettings.temperature, localSettings.top_p, localSettings.max_tokens, localSettings.context_length, pollRuntimeStatus]);
+
+  const handleStopRuntime = useCallback(async () => {
+    try {
+      await runtimeStop();
+      setRuntimeStatus("Down");
+      setRuntimePort(null);
+      setRuntimeHealthStatusText(null);
+    } catch {
+      setRuntimeStatus("Down");
+      setRuntimePort(null);
+    }
+  }, []);
+
+  const handleRestartRuntime = useCallback(async () => {
+    await handleStopRuntime();
+    await new Promise((r) => setTimeout(r, 500));
+    await handleStartRuntime();
+  }, [handleStopRuntime, handleStartRuntime]);
 
   const rescanModels = useCallback(async () => {
     const root = workspace.root;
@@ -1500,8 +2334,9 @@ export default function App() {
   }, []);
 
   const handleInstallAllSafe = useCallback(async () => {
-    // Only include non-blocked winget items
-    let wingetOnly = missingPrereqs.filter(
+    // Only include non-blocked winget items (missing + optional recommendations)
+    type InstallableItem = MissingPrereqResult | RecommendedPrereqResult;
+    let wingetOnly: InstallableItem[] = missingPrereqs.filter(
       (r) => r.prereq.installMethod === "winget" && r.prereq.installCommandPowerShell && !r.blockedBy
     );
     
@@ -1519,11 +2354,12 @@ export default function App() {
   }, [missingPrereqs, recommendedPrereqs, includeRecommendations, runInstallScript]);
 
   const handleInstallAllAdvanced = useCallback(async () => {
-    // Only include non-blocked items
-    let wingetOnly = missingPrereqs.filter(
+    // Only include non-blocked items (missing + optional recommendations)
+    type InstallableItem = MissingPrereqResult | RecommendedPrereqResult;
+    let wingetOnly: InstallableItem[] = missingPrereqs.filter(
       (r) => r.prereq.installMethod === "winget" && r.prereq.installCommandPowerShell && !r.blockedBy
     );
-    let chocoOnly = missingPrereqs.filter(
+    let chocoOnly: InstallableItem[] = missingPrereqs.filter(
       (r) => r.prereq.installMethod === "choco" && r.prereq.installCommandPowerShell && !r.blockedBy
     );
     
@@ -1983,7 +2819,7 @@ export default function App() {
   return (
     <div className="app app-single-flow">
       <TopBar workspacePath={workspacePath} onOpenWorkspace={openWorkspace} />
-      <div className="main-two-pane">
+      <div className="main-three-pane">
         <ConversationPane
           messages={messages}
           planAndPatch={planAndPatch}
@@ -2011,7 +2847,15 @@ export default function App() {
           onProviderChange={setProvider}
           toolRoot={toolRoot}
           hasLlamaAtToolRoot={hasLlamaAtToolRoot}
+          runtimeHealthStatus={runtimeHealthStatus}
+          providerFallbackMessage={providerFallbackMessage}
+          downloadLog={downloadLog}
+          downloadInProgress={downloadInProgress}
           onInitializeTools={onInitializeTools}
+          onOpenToolsFolder={onOpenToolsFolder}
+          onDownloadRecommendedModel={onDownloadRecommendedModel}
+          onRecheckRuntime={onRecheckRuntime}
+          onRetryLocalProvider={onRecheckRuntime}
           localSettings={localSettings}
           onLocalSettingsChange={setLocalSettings}
           onRescanModels={rescanModels}
@@ -2056,9 +2900,11 @@ export default function App() {
           activeProposalStatus={activeEntry?.status ?? null}
           onReviewProposal={setActiveProposalForReview}
           onDiscardProposal={discardProposalFromStack}
+          lastFileChoiceCandidates={lastFileChoiceCandidates}
         />
-        <FilesPane
-          fileTree={fileTree}
+        <div className="main-pane-middle">
+          <FilesPane
+            fileTree={fileTree}
           selectedPaths={selectedPaths}
           onSelectPathsChange={setSelectedPaths}
           onPickFiles={selectFilesForContext}
@@ -2070,7 +2916,7 @@ export default function App() {
           onApplySession={applySession}
           onRevertSession={revertSession}
           showDiffPanel={showDiffPanel}
-          patch={planAndPatch?.patch ?? null}
+          patch={(planAndPatch?.cappedPatch ?? planAndPatch?.patch) ?? null}
           previewMap={previewMap}
           selectedDiffPath={selectedDiffPath}
           onSelectDiffPath={setSelectedDiffPath}
@@ -2089,6 +2935,22 @@ export default function App() {
           onSelectMultiFileIndex={setSelectedMultiFileIndex}
           onApplyMultiFileSelected={applyMultiFileProposalSelected}
           onCancelMultiFileProposal={cancelMultiFileProposal}
+        />
+        </div>
+        <LivePane
+          isOpen={livePaneOpen}
+          onToggleOpen={handleLivePaneToggle}
+          hasFailed={lastRunFailed}
+          onRetry={handleRetry}
+          workspaceRoot={workspacePath}
+          runtimeStatus={runtimeStatus}
+          runtimePort={runtimePort}
+          runtimeHealthStatus={runtimeHealthStatusText}
+          runtimeSpawnError={runtimeSpawnError}
+          runtimeLogLines={runtimeLogLines}
+          onStartRuntime={handleStartRuntime}
+          onStopRuntime={handleStopRuntime}
+          onRestartRuntime={handleRestartRuntime}
         />
       </div>
     </div>

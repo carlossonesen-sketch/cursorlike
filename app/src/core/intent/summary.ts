@@ -7,7 +7,6 @@ import { runtimeChat } from "../runtime/runtimeApi";
 import type { ChangeSummary } from "../types";
 import type { ProposalGroundTruth } from "./groundTruth";
 import { buildProposalGroundTruth } from "./groundTruth";
-import type { ProposalFileLike } from "./groundTruth";
 
 /** Model outputs ONLY these; file list is built from proposal in code. */
 const GROUNDED_JSON_SCHEMA = `{
@@ -157,7 +156,6 @@ function bulletReferencesAllowed(
   validPaths: Set<string>,
   allAnchors: Set<string>
 ): boolean {
-  const lower = bullet.toLowerCase();
   if (Array.from(validPaths).some((p) => bullet.includes(p))) return true;
   const tokens = bullet.split(/\s+/).filter((t) => t.length > 1);
   for (const t of tokens) {

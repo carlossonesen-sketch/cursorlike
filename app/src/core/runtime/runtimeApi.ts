@@ -7,7 +7,8 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type Provider = "mock" | "local";
 
-const DEFAULT_PORT = 11435;
+/** Default port for llama-server (override with env LLAMA_PORT on backend). */
+const DEFAULT_PORT = 8080;
 
 export interface RuntimeStartParams {
   temperature?: number;
@@ -28,7 +29,7 @@ export const DEFAULT_LOCAL_SETTINGS: LocalModelSettings = {
   ggufPath: "",
   temperature: 0.7,
   top_p: 0.9,
-  max_tokens: 2048,
+  max_tokens: 128,
   context_length: 4096,
 };
 
@@ -52,16 +53,25 @@ export interface ChatOptions {
   temperature?: number;
 }
 
-/** Try /v1/chat/completions first; on failure try /completion. Returns assistant content or throws. */
+/** Cancel an in-flight run (e.g. after timeout or user Stop). No-op if run_id not registered. */
+export function runtimeCancelRun(runId: string): void {
+  invoke("runtime_cancel_run", { runId }).catch(() => {
+    /* ignore */
+  });
+}
+
+/** Try /v1/chat/completions first; on failure try /completion. Returns assistant content or throws. If runId provided, backend can abort via runtime_cancel_run. */
 export async function runtimeChat(
   systemPrompt: string,
   userPrompt: string,
-  options?: ChatOptions
+  options?: ChatOptions,
+  runId?: string
 ): Promise<string> {
   return invoke<string>("runtime_chat", {
     systemPrompt,
     userPrompt,
     options: options ?? undefined,
+    runId: runId ?? undefined,
   });
 }
 
@@ -71,10 +81,14 @@ export const LLAMA_SERVER_REL = "runtime/llama/llama-server.exe";
 /** Walk up from workspace_root (up to 8 levels). First dir with runtime/llama + models/ is toolRoot. */
 /** Effective toolRoot = local (if has llama-server) ?? global. Returns global path even when llama-server is missing (for Initialize Tools). */
 export async function findToolRoot(workspaceRoot: string): Promise<string | null> {
-  const local = await invoke<unknown>("find_tool_root", { workspaceRoot });
-  if (typeof local === "string" && local) {
-    const hasLlama = await toolRootExists(local, LLAMA_SERVER_REL);
-    if (hasLlama) return local;
+  try {
+    const local = await invoke<unknown>("find_tool_root", { workspaceRoot });
+    if (typeof local === "string" && local) {
+      const hasLlama = await toolRootExists(local, LLAMA_SERVER_REL);
+      if (hasLlama) return local;
+    }
+  } catch {
+    /* local discovery failed (e.g. invalid path, permission); fall through to global */
   }
 
   try {
@@ -84,6 +98,11 @@ export async function findToolRoot(workspaceRoot: string): Promise<string | null
     /* fall through */
   }
   return null;
+}
+
+/** Global tool root: %LOCALAPPDATA%\\DevAssistantCursorLite\\tools. */
+export async function getGlobalToolRoot(): Promise<string> {
+  return invoke<string>("get_global_tool_root");
 }
 
 /** Scan toolRoot/models for *.gguf. Returns toolRoot-relative path (e.g. models/foo.gguf) or null. */
@@ -100,6 +119,31 @@ export async function toolRootExists(toolRoot: string, relPath: string): Promise
 /** GET http://127.0.0.1:port/health; true if 200. */
 export async function runtimeHealthCheck(port: number): Promise<boolean> {
   return invoke<boolean>("runtime_health_check", { port });
+}
+
+/** GET http://127.0.0.1:port/health; returns status code or throws with error string. */
+export async function runtimeHealthCheckStatus(port: number): Promise<number> {
+  return invoke<number>("runtime_health_check_status", { port });
+}
+
+/** Last ~200 lines of llama-server stdout/stderr. */
+export async function getRuntimeLog(): Promise<string[]> {
+  return invoke<string[]>("get_runtime_log");
+}
+
+/** Scan %LOCALAPPDATA%\\DevAssistantCursorLite\\tools\\models for .gguf; prefer q4_k_m else largest. Returns absolute path or null. */
+export async function scanGlobalModelsGGUF(): Promise<string | null> {
+  const result = await invoke<unknown>("scan_global_models_gguf");
+  return typeof result === "string" ? result : null;
+}
+
+export interface AppConfig {
+  patch_timeout_seconds: number;
+}
+
+/** App config (e.g. PATCH_TIMEOUT_SECONDS from env, default 240). */
+export async function getAppConfig(): Promise<AppConfig> {
+  return invoke<AppConfig>("get_app_config");
 }
 
 export function resolveModelPath(toolRoot: string, relPath: string): string {
@@ -132,15 +176,18 @@ export async function runtimeStop(): Promise<void> {
   return invoke("runtime_stop");
 }
 
+/** Generate completion. If runId provided, backend can abort via runtime_cancel_run. */
 export async function runtimeGenerate(
   prompt: string,
   stream: boolean,
-  options?: GenerateOptions
+  options?: GenerateOptions,
+  runId?: string
 ): Promise<string> {
   return invoke<string>("runtime_generate", {
     prompt,
     stream,
     options: options || undefined,
+    runId: runId ?? undefined,
   });
 }
 

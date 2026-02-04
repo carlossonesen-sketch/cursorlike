@@ -1,7 +1,7 @@
 export * from "./types";
 export { WorkspaceService } from "./workspace/WorkspaceService";
 export { getRequestedFileHint, readProjectFile, extractFileMentions, hasEditIntent, hasDiffRequest, routeMessage, hasFileEditIntent } from "./workspace/readProjectFile";
-export { routeUserMessage, impliesMultiFile, classifyFileActionIntent, applySimpleEdit, generateSimpleEdit, generateFileEdit, isSimpleEditPatternMatched, generateMultiFileProposal, parseMultiFileProposal, generateProposalSummary, validateAndFixSummary, buildFileListFromGroundTruth, buildProposalGroundTruth } from "./intent";
+export { routeUserMessage, impliesMultiFile, classifyFileActionIntent, applySimpleEdit, generateSimpleEdit, generateFileEdit, isSimpleEditPatternMatched, generateMultiFileProposal, parseMultiFileProposal, generateProposalSummary, validateAndFixSummary, buildFileListFromGroundTruth, buildProposalGroundTruth, searchFilesForEdit, extractSearchKeywords, HIGH_CONFIDENCE_THRESHOLD } from "./intent";
 export type { GenerateFileEditOptions, GenerateFileEditResult, MultiFileProposal, ProposedFileChange, GenerateSummaryInputSingle, GenerateSummaryInputMulti, GenerateSummaryInputGrounded, ValidateSummaryOptions, ProposalGroundTruth, ProposalFileLike, FileGroundTruth } from "./intent";
 export { runVerificationChecks } from "./verify/runChecks";
 export type { VerificationResult, CheckStage } from "./verify/runChecks";
@@ -74,13 +74,20 @@ export {
 export type { PipelineResult, PipelineOverrides, IPlannerAgent, ICoderAgent, IReviewerAgent } from "./agents";
 export {
   findToolRoot,
+  getGlobalToolRoot,
   scanModelsForGGUF,
+  scanGlobalModelsGGUF,
   toolRootExists,
   resolveModelPath,
   runtimeStart,
   runtimeStatus,
   runtimeStop,
   runtimeGenerate,
+  runtimeCancelRun,
+  runtimeHealthCheck,
+  runtimeHealthCheckStatus,
+  getRuntimeLog,
+  getAppConfig,
   ensureLocalRuntime,
   DEFAULT_LOCAL_SETTINGS,
   LLAMA_SERVER_REL,
@@ -91,6 +98,7 @@ export type {
   RuntimeStartResult,
   RuntimeStatusResult,
   GenerateOptions,
+  AppConfig,
 } from "./runtime/runtimeApi";
 export { PatchEngine } from "./patch/PatchEngine";
 export type { ApplyResult, FileSnapshot } from "./patch/PatchEngine";
@@ -98,3 +106,33 @@ export { MemoryStore } from "./memory/MemoryStore";
 export { resumeSuggestion } from "./memory/resumeSuggestion";
 export type { ResumeSuggestion } from "./memory/resumeSuggestion";
 export { KnowledgeStore } from "./knowledge/KnowledgeStore";
+export {
+  subscribe as subscribeProgress,
+  emit,
+  emitStep,
+  emitStepForRun,
+  startProgressHeartbeat,
+  getHistory as getProgressHistory,
+  clearHistory as clearProgressHistory,
+  getCurrentRunId,
+  setCurrentRunId,
+  requestCancel,
+  isCancelRequested,
+} from "./progress/progressEvents";
+export type { ProgressEvent, ProgressPhase, ProgressLevel } from "./progress/progressEvents";
+export {
+  createRun,
+  registerRunToken,
+  unregisterRunToken,
+  cancelCurrentRun,
+  raceWithCancel,
+  raceWithTimeout,
+  throwIfCancelled,
+  isActiveRun,
+  PLANNING_TIMEOUT_MS,
+  DIFF_GENERATION_TIMEOUT_MS,
+  VALIDATION_TIMEOUT_MS,
+  PLAN_AND_EDIT_PLAN_TIMEOUT_MS,
+} from "./runManager/runManager";
+export type { CancellationToken } from "./runManager/runManager";
+export { CancelledError, TimeoutError } from "./runManager/runManager";
