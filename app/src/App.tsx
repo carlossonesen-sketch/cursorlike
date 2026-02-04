@@ -1,4 +1,4 @@
-// NOTE: temporary comment added for testing the file-edit flow.
+﻿// NOTE: temporary comment added for testing the file-edit flow.
 
 import { useState, useCallback, useRef, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -429,7 +429,7 @@ export default function App() {
 
   const onDownloadRecommendedModel = useCallback(async () => {
     setDownloadInProgress(true);
-    setDownloadLog("Preparing download…");
+    setDownloadLog("Preparing downloadâ€¦");
     let tr = toolRoot;
     if (!tr) {
       try {
@@ -451,7 +451,7 @@ export default function App() {
     const modelsDir = `${trBackslash}\\models`;
     const outPath = `${modelsDir}\\${RECOMMENDED_GGUF_NAME}`;
     try {
-      setDownloadLog(`Downloading to: ${outPath}\n\nStarting…`);
+      setDownloadLog(`Downloading to: ${outPath}\n\nStartingâ€¦`);
       const r = await workspace.downloadFileToPath(RECOMMENDED_GGUF_URL, outPath);
       const sizeBytes = r.bytesWritten;
       let log = `Out path: ${outPath}\n\nBytes written: ${sizeBytes} (${(sizeBytes / 1024 / 1024).toFixed(1)} MB)`;
@@ -483,7 +483,7 @@ export default function App() {
   }, [toolRoot]);
 
   const onRecheckRuntime = useCallback(async () => {
-    setStatusLine("Checking runtime…");
+    setStatusLine("Checking runtimeâ€¦");
     try {
       await runGlobalRuntimeHealthCheck();
     } finally {
@@ -519,7 +519,7 @@ export default function App() {
   const refreshSnapshot = useCallback(async () => {
     const root = workspace.root;
     if (!root) return;
-    setStatusLine("Refreshing snapshotâ€¦");
+    setStatusLine("Refreshing snapshotÃ¢â‚¬Â¦");
     try {
       const detector = new ProjectDetector(workspace);
       const detected = await detector.detect();
@@ -557,7 +557,7 @@ export default function App() {
     setEnabledPacks([]);
     setToolRoot(null);
     setHasLlamaAtToolRoot(false);
-    setStatusLine("Scanning workspace…");
+    setStatusLine("Scanning workspaceâ€¦");
     try {
       const root = workspace.root ?? path;
 
@@ -724,7 +724,7 @@ export default function App() {
         const cmd = p.slice(1).trim().toLowerCase().split(/\s+/)[0] || "";
         let reply: string;
         if (cmd === "help") {
-          reply = "Commands: /help â€” this message; /snapshot â€” project snapshot.";
+          reply = "Commands: /help Ã¢â‚¬â€ this message; /snapshot Ã¢â‚¬â€ project snapshot.";
         } else if (cmd === "snapshot") {
           reply = projectSnapshot
             ? `Types: ${projectSnapshot.detectedTypes.join(", ")}. Packs: ${projectSnapshot.enabledPacks.join(", ")}.`
@@ -742,6 +742,10 @@ export default function App() {
       // ROUTING: File actions FIRST, before any chat logic
       const activeFilePath = fileEditState?.relativePath ?? undefined;
       const route = routeUserMessage(p, { activeFilePath, currentOpenFilePath: activeFilePath, workspaceRoot: root });
+      console.log("ROUTE_DEBUG", {
+        action: route.action,
+        preview: p?.slice(0, 120) ?? "(no input)",
+      });      
       const initialRoute = route;
       console.log("MESSAGE_ROUTING chosenRoute:", route);
 
@@ -786,8 +790,8 @@ export default function App() {
 
       // Multi-file edit: generate proposal via LLM (with explicit targetFiles when from route.targetHints)
       if (route.action === "multi_file_edit") {
-        setStatusLine("Generating multi-file proposal…");
-        emitStep("plan", "Generating multi-file proposal…");
+        setStatusLine("Generating multi-file proposalâ€¦");
+        emitStep("plan", "Generating multi-file proposalâ€¦");
         let stopHeartbeat: (() => void) | undefined;
         try {
           throwIfCancelled(runId, token);
@@ -818,7 +822,7 @@ export default function App() {
             }
           }
           throwIfCancelled(runId, token);
-          stopHeartbeat = startProgressHeartbeat("plan", "Generating multi-file proposal…");
+          stopHeartbeat = startProgressHeartbeat("plan", "Generating multi-file proposalâ€¦");
           let proposal: Awaited<ReturnType<typeof generateMultiFileProposal>> | null = null;
           try {
             proposal = await raceWithCancel(
@@ -854,7 +858,7 @@ export default function App() {
             for (const f of verifiedProposal.files) {
               included[f.path] = true; // default ON
             }
-            setStatusLine("Generating summaryâ€¦");
+            setStatusLine("Generating summaryÃ¢â‚¬Â¦");
             const multiGroundTruth = buildProposalGroundTruth(verifiedProposal.files);
             const multiSummaryRaw = await generateProposalSummary({
               type: "grounded",
@@ -902,9 +906,9 @@ export default function App() {
               },
             ]);
           } else {
-            emitStep("search", "Searching for candidate files…");
+            emitStep("search", "Searching for candidate filesâ€¦");
             throwIfCancelled(runId, token);
-            stopHeartbeat = startProgressHeartbeat("search", "Searching for candidate files…");
+            stopHeartbeat = startProgressHeartbeat("search", "Searching for candidate filesâ€¦");
             let bestMatches: { path: string; confidence: number }[] = [];
             try {
               bestMatches = await searchFilesForEdit(
@@ -920,7 +924,7 @@ export default function App() {
             }
             const top3 = bestMatches.slice(0, 3).map((c) => c.path);
             setLastFileChoiceCandidates(top3);
-            const intro = "I can do that — I just need to know where to make the change.";
+            const intro = "I can do that â€” I just need to know where to make the change.";
             const body = top3.length > 0
               ? "\n\n" + top3.map((path, i) => `${i + 1}. ${path}`).join("\n") + "\n\nReply with 1, 2, or 3."
               : "\n\nWhich file should I change? You can open the file and tell me what to edit.";
@@ -968,8 +972,8 @@ export default function App() {
 
       // Plain-English: edit intent but no file named -> auto-search, then high confidence = diff, low = ask to pick
       if (route.action === "file_edit_auto_search") {
-        setStatusLine("Searching for relevant file…");
-        emitStep("search", "Searching repo…");
+        setStatusLine("Searching for relevant fileâ€¦");
+        emitStep("search", "Searching repoâ€¦");
         let stopHeartbeatSearch: (() => void) | undefined;
         try {
           throwIfCancelled(runId, token);
@@ -977,7 +981,7 @@ export default function App() {
           const m = manifest ?? (await raceWithCancel(runId, token, inspector.buildManifest()));
           throwIfCancelled(runId, token);
           if (!manifest) setManifest(m);
-          stopHeartbeatSearch = startProgressHeartbeat("search", "Searching repo…");
+          stopHeartbeatSearch = startProgressHeartbeat("search", "Searching repoâ€¦");
           let candidates: { path: string; confidence: number }[];
           try {
             candidates = await searchFilesForEdit(
@@ -1044,13 +1048,13 @@ export default function App() {
             }
             const resolvedPath = "content" in result ? result.path : (result as { path: string }).path;
             const originalContent = "content" in result ? result.content : "";
-            emitStep("diff", "Generating edit proposal…", { path: resolvedPath });
-            setStatusLine("Generating edit proposal…");
+            emitStep("diff", "Generating edit proposalâ€¦", { path: resolvedPath });
+            setStatusLine("Generating edit proposalâ€¦");
             throwIfCancelled(runId, token);
             let stopHeartbeatDiff: (() => void) | undefined;
             let editResult: { proposedContent: string; plan: string[]; usedModel: boolean };
             try {
-              stopHeartbeatDiff = startProgressHeartbeat("diff", "Generating edit proposal…");
+              stopHeartbeatDiff = startProgressHeartbeat("diff", "Generating edit proposalâ€¦");
               editResult = await raceWithCancel(
                 runId,
                 token,
@@ -1070,7 +1074,7 @@ export default function App() {
               { path: resolvedPath, original: originalContent, proposed: editResult.proposedContent, diff },
             ];
             throwIfCancelled(runId, token);
-            let stopHeartbeatValidate: (() => void) | undefined = startProgressHeartbeat("validate", "Validating proposal…");
+            let stopHeartbeatValidate: (() => void) | undefined = startProgressHeartbeat("validate", "Validating proposalâ€¦");
             try {
               const singleGroundTruth = buildProposalGroundTruth(
                 files.map((f) => ({ path: f.path, original: f.original, proposed: f.proposed, exists: true }))
@@ -1160,7 +1164,7 @@ export default function App() {
           unregisterRunToken();
           const top3 = candidates.slice(0, 3).map((c) => c.path);
           setLastFileChoiceCandidates(top3);
-          const intro = "I can do that — I just need to know where to make the change.";
+          const intro = "I can do that â€” I just need to know where to make the change.";
           const body = top3.length > 0
             ? "\n\n" + top3.map((path, i) => `${i + 1}. ${path}`).join("\n") + "\n\nReply with 1, 2, or 3."
             : "\n\nWhich file should I change? You can open the file and tell me what to edit.";
@@ -1253,8 +1257,8 @@ export default function App() {
           diffRequest && !impliesMultiFile(p) ? resolved.slice(0, 1) : resolved;
 
         if (diffRequest) {
-          setStatusLine("Generating patch…");
-          emitStep("plan", "Generating patch…");
+          setStatusLine("Generating patchâ€¦");
+          emitStep("plan", "Generating patchâ€¦");
           let stopHeartbeatPlan: (() => void) | undefined;
           try {
             throwIfCancelled(runId, token);
@@ -1280,7 +1284,7 @@ export default function App() {
             throwIfCancelled(runId, token);
             if (!isActiveRun(runId, token)) return;
             const patchCtx = { ...ctx, runId };
-            stopHeartbeatPlan = startProgressHeartbeat("diff", "Generating patch…");
+            stopHeartbeatPlan = startProgressHeartbeat("diff", "Generating patchâ€¦");
             const runPatch = () =>
               raceWithTimeout("diff", PLAN_AND_EDIT_PLAN_TIMEOUT_MS, generatePlanAndPatch(patchCtx), token);
             let patchResult: PlanAndPatch;
@@ -1380,15 +1384,15 @@ export default function App() {
 
         const targets = resolved.map((r) => r.path);
         if (isEdit && route.instructions) {
-          setStatusLine("Generating edit proposalâ€¦");
-          emitStep("diff", "Generating edit proposal…");
+          setStatusLine("Generating edit proposalÃ¢â‚¬Â¦");
+          emitStep("diff", "Generating edit proposalâ€¦");
           let stopHeartbeatEdit: (() => void) | undefined;
           try {
             throwIfCancelled(runId, token);
             const files: PendingEditFile[] = [];
             for (const r of resolved) {
               throwIfCancelled(runId, token);
-              stopHeartbeatEdit = startProgressHeartbeat("diff", "Generating edit proposal…");
+              stopHeartbeatEdit = startProgressHeartbeat("diff", "Generating edit proposalâ€¦");
               try {
               const editResult = await raceWithCancel(
                 runId,
@@ -1408,7 +1412,7 @@ export default function App() {
               }
             }
             const peId = `pe-${Date.now()}`;
-            setStatusLine("Generating summaryâ€¦");
+            setStatusLine("Generating summaryÃ¢â‚¬Â¦");
             const singleGroundTruth = buildProposalGroundTruth(
               files.map((f, i) => ({
                 path: f.path,
@@ -1536,8 +1540,8 @@ export default function App() {
         return;
       }
       console.log("MESSAGE_ROUTING: chat");
-      setStatusLine("Generating reply…");
-      emitStep("plan", "Generating reply…");
+      setStatusLine("Generating replyâ€¦");
+      emitStep("plan", "Generating replyâ€¦");
       let stopHeartbeatChat: (() => void) | undefined;
       let streamMsgId: string | null = null;
       try {
@@ -1569,7 +1573,7 @@ export default function App() {
             chunkText: c.chunkText,
           })) ?? []
         );
-        stopHeartbeatChat = startProgressHeartbeat("plan", "Generating reply…");
+        stopHeartbeatChat = startProgressHeartbeat("plan", "Generating replyâ€¦");
         streamMsgId = `a-${Date.now()}`;
         streamingMessageIdRef.current = streamMsgId;
         currentStreamRunIdRef.current = runId;
@@ -1646,14 +1650,14 @@ export default function App() {
       setReviewerOutput(null);
       const p = (prompt || "").trim() || "(no prompt)";
       setMessages((prev) => [...prev, { id: `u-${Date.now()}`, role: "user", text: p }]);
-      setStatusLine("Scanning selected filesâ€¦");
+      setStatusLine("Scanning selected filesÃ¢â‚¬Â¦");
       try {
         const inspector = new ProjectInspector(workspace);
         const m = manifest ?? (await inspector.buildManifest());
         if (!manifest) setManifest(m);
         const ctxBuilder = new ContextBuilder(workspace, m);
         const knowledgeStore = useKnowledgePacks ? new KnowledgeStore(root, workspace) : null;
-        setStatusLine("Generating patchâ€¦");
+        setStatusLine("Generating patchÃ¢â‚¬Â¦");
         const ctx = await ctxBuilder.build(p, selectedPaths, {
           useKnowledge: useKnowledgePacks,
           knowledgeStore: knowledgeStore ?? undefined,
@@ -1707,7 +1711,7 @@ export default function App() {
       setViewingSessionId(null);
       const p = (prompt || "").trim() || "(no prompt)";
       setMessages((prev) => [...prev, { id: `u-${Date.now()}`, role: "user", text: p }]);
-        setStatusLine("Running pipelineâ€¦");
+        setStatusLine("Running pipelineÃ¢â‚¬Â¦");
         try {
           const inspector = new ProjectInspector(workspace);
           const m = manifest ?? (await inspector.buildManifest());
@@ -1957,7 +1961,7 @@ export default function App() {
   const applyPatch = useCallback(async () => {
     if (!workspacePath || !workspace.root || !planAndPatch || !currentProposedSessionId) return;
     setApplyInProgress(true);
-    setStatusLine("Applying patchâ€¦");
+    setStatusLine("Applying patchÃ¢â‚¬Â¦");
     try {
       const engine = new PatchEngine(workspace.root, (p) =>
         workspace.readFile(p)
@@ -2003,7 +2007,7 @@ export default function App() {
     }
     if (appState === "patchApplied" && lastBeforeSnapshots?.length && workspace.root) {
       setApplyInProgress(true);
-      setStatusLine("Revertingâ€¦");
+      setStatusLine("RevertingÃ¢â‚¬Â¦");
       try {
         const store = new MemoryStore(workspace.root);
         if (lastAppliedSessionId) await store.updateSessionStatus(lastAppliedSessionId, "reverted");
@@ -2101,7 +2105,7 @@ export default function App() {
       const appliedSummary = pendingEdit?.summary;
       const appliedMsg =
         appliedSummary != null
-          ? `Applied âœ“\n\n**${appliedSummary.title}**\n\nWhat changed:\n${appliedSummary.whatChanged.map((b) => `â€¢ ${b}`).join("\n")}\n\nBehavior after:\n${appliedSummary.behaviorAfter.map((b) => `â€¢ ${b}`).join("\n")}\n\nFiles: ${appliedSummary.files.map((f) => `${f.path}: ${f.change}`).join("; ")}${appliedSummary.risks?.length ? `\n\nRisks: ${appliedSummary.risks.map((b) => `â€¢ ${b}`).join("\n")}` : ""}`
+          ? `Applied Ã¢Å“â€œ\n\n**${appliedSummary.title}**\n\nWhat changed:\n${appliedSummary.whatChanged.map((b) => `Ã¢â‚¬Â¢ ${b}`).join("\n")}\n\nBehavior after:\n${appliedSummary.behaviorAfter.map((b) => `Ã¢â‚¬Â¢ ${b}`).join("\n")}\n\nFiles: ${appliedSummary.files.map((f) => `${f.path}: ${f.change}`).join("; ")}${appliedSummary.risks?.length ? `\n\nRisks: ${appliedSummary.risks.map((b) => `Ã¢â‚¬Â¢ ${b}`).join("\n")}` : ""}`
           : appliedPaths.length > 1
             ? `Applied changes to: ${appliedPaths.join(", ")}`
             : `Applied changes to: ${appliedPaths[0]}`;
@@ -2110,7 +2114,7 @@ export default function App() {
         { id: `a-${Date.now()}`, role: "assistant", text: appliedMsg },
       ]);
       if (devMode === "safe") {
-        setStatusLine("Checking prerequisitesâ€¦");
+        setStatusLine("Checking prerequisitesÃ¢â‚¬Â¦");
         const checkFile = (path: string) => workspace.exists(path);
         const readFileForProfile = (path: string) => workspace.readFile(path);
         const profile = await pickVerifyProfileFromSignals(checkFile, readFileForProfile);
@@ -2135,7 +2139,7 @@ export default function App() {
           setStatusLine(null);
           return;
         }
-        setStatusLine("Running verificationâ€¦");
+        setStatusLine("Running verificationÃ¢â‚¬Â¦");
         try {
           let cmds = projectSnapshot?.detectedCommands ?? {};
           if (!cmds.typecheck && !cmds.lint) {
@@ -2189,7 +2193,7 @@ export default function App() {
       if (!failed) return;
       const touchedPaths = lastApplySnapshot.changes.map((c) => c.path);
       const fixPrompt = `Fix the following ${failed.name} errors. Only modify the reported issues.\n\nSTDERR:\n${failed.stderr}\n\nSTDOUT:\n${failed.stdout}\n\nFiles that were changed: ${touchedPaths.join(", ")}`;
-      setStatusLine("Auto-fix: generating patchâ€¦");
+      setStatusLine("Auto-fix: generating patchÃ¢â‚¬Â¦");
       try {
         const inspector = new ProjectInspector(workspace);
         const m = manifest ?? (await inspector.buildManifest());
@@ -2208,7 +2212,7 @@ export default function App() {
         await engine.apply(patchResult.patch);
         setMessages((prev) => [
           ...prev,
-          { id: `a-${Date.now()}`, role: "assistant", text: "Auto-fix applied. Re-running verificationâ€¦" },
+          { id: `a-${Date.now()}`, role: "assistant", text: "Auto-fix applied. Re-running verificationÃ¢â‚¬Â¦" },
         ]);
         const cmds = projectSnapshot?.detectedCommands ?? {};
         const res = await runVerificationChecks({
@@ -2390,7 +2394,7 @@ export default function App() {
   }, [missingPrereqs, recommendedPrereqs, includeRecommendations, runInstallScript]);
 
   const handleRecheckPrereqs = useCallback(async () => {
-    setStatusLine("Checking prerequisitesâ€¦");
+    setStatusLine("Checking prerequisitesÃ¢â‚¬Â¦");
     await checkPrereqs();
     await checkRecommendations();
     setStatusLine(null);
@@ -2532,7 +2536,7 @@ export default function App() {
     const multiAppliedSummary = multiFileProposal?.summary;
     const multiAppliedMsg =
       multiAppliedSummary != null
-        ? `Applied âœ“\n\n**${multiAppliedSummary.title}**\n\nWhat changed:\n${multiAppliedSummary.whatChanged.map((b) => `â€¢ ${b}`).join("\n")}\n\nBehavior after:\n${multiAppliedSummary.behaviorAfter.map((b) => `â€¢ ${b}`).join("\n")}\n\nFiles: ${multiAppliedSummary.files.map((f) => `${f.path}: ${f.change}`).join("; ")}${multiAppliedSummary.risks?.length ? `\n\nRisks: ${multiAppliedSummary.risks.map((b) => `â€¢ ${b}`).join("\n")}` : ""}`
+        ? `Applied Ã¢Å“â€œ\n\n**${multiAppliedSummary.title}**\n\nWhat changed:\n${multiAppliedSummary.whatChanged.map((b) => `Ã¢â‚¬Â¢ ${b}`).join("\n")}\n\nBehavior after:\n${multiAppliedSummary.behaviorAfter.map((b) => `Ã¢â‚¬Â¢ ${b}`).join("\n")}\n\nFiles: ${multiAppliedSummary.files.map((f) => `${f.path}: ${f.change}`).join("; ")}${multiAppliedSummary.risks?.length ? `\n\nRisks: ${multiAppliedSummary.risks.map((b) => `Ã¢â‚¬Â¢ ${b}`).join("\n")}` : ""}`
         : `Applied ${toApply.length} file(s): ${toApply.map((f) => f.path).join(", ")}`;
     setActiveProposalId(null);
     setFileEditState(null);
@@ -2543,7 +2547,7 @@ export default function App() {
       { id: `a-${Date.now()}`, role: "assistant", text: multiAppliedMsg },
     ]);
     if (devMode === "safe") {
-      setStatusLine("Checking prerequisitesâ€¦");
+      setStatusLine("Checking prerequisitesÃ¢â‚¬Â¦");
       const checkFile = (path: string) => workspace.exists(path);
       const readFileForProfile = (path: string) => workspace.readFile(path);
       const profile = await pickVerifyProfileFromSignals(checkFile, readFileForProfile);
@@ -2568,7 +2572,7 @@ export default function App() {
         setStatusLine(null);
         return;
       }
-      setStatusLine("Running verificationâ€¦");
+      setStatusLine("Running verificationÃ¢â‚¬Â¦");
       try {
         let cmds = projectSnapshot?.detectedCommands ?? {};
         if (!cmds.typecheck && !cmds.lint) {
@@ -2711,7 +2715,7 @@ export default function App() {
   }, [fileEditState]);
 
   const runChecks = useCallback(() => {
-    setStatusLine("Running checksâ€¦");
+    setStatusLine("Running checksÃ¢â‚¬Â¦");
     setTimeout(() => setStatusLine(null), 800);
     /* TODO: TaskRunner; Sprint 3 */
   }, []);
@@ -2740,7 +2744,7 @@ export default function App() {
     async (s: SessionRecord) => {
       if (!workspace.root || s.status !== "pending") return;
       setApplyInProgress(true);
-      setStatusLine("Applying patchâ€¦");
+      setStatusLine("Applying patchÃ¢â‚¬Â¦");
       try {
         const engine = new PatchEngine(workspace.root, (p) =>
           workspace.readFile(p)
@@ -2770,7 +2774,7 @@ export default function App() {
       const snapshots = s.beforeSnapshots;
       if (!snapshots?.length) return;
       setApplyInProgress(true);
-      setStatusLine("Revertingâ€¦");
+      setStatusLine("RevertingÃ¢â‚¬Â¦");
       try {
         const engine = new PatchEngine(workspace.root, (p) =>
           workspace.readFile(p)
@@ -2956,6 +2960,8 @@ export default function App() {
     </div>
   );
 }
+
+
 
 
 

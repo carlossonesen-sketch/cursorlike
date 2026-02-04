@@ -1,4 +1,4 @@
-/**
+﻿/**
  * RunManager: per-run CancellationToken and AbortController so Stop actually cancels in-flight work.
  * - runId + token + AbortController created per run
  * - token.cancel() marks cancelled, aborts controller, emits progress "cancel"
@@ -123,6 +123,9 @@ export function raceWithTimeout<T>(
   task: Promise<T>,
   token?: CancellationToken
 ): Promise<T> {
+  if (import.meta.env.VITE_NO_TIMEOUT === "1") {
+    return task;
+  }
   const timeout = timeoutPromise(phase, timeoutMs);
   const withAbort = token?.abortRequest
     ? timeout.then((err) => {
@@ -149,3 +152,5 @@ export const VALIDATION_TIMEOUT_MS = 30_000;
 
 /** Plan-based patch: plan + edit-plan JSON only (diff is generated locally). No long model diff wait. */
 export const PLAN_AND_EDIT_PLAN_TIMEOUT_MS = 120_000;
+
+
