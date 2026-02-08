@@ -66,6 +66,11 @@ export async function getGlobalModelsDir(): Promise<string> {
   return invoke<string>("get_global_models_dir");
 }
 
+/** Download a file to destPath (must be under global models dir). Backend uses curl then PowerShell fallback on Windows. */
+export async function downloadModelFile(url: string, destPath: string): Promise<void> {
+  return invoke("download_file", { url, destPath });
+}
+
 export async function discoverModels(workspaceRoot: string): Promise<DiscoveredModelEntry[]> {
   const list = await invoke<DiscoveredModelEntry[]>("discover_gguf_models", { workspaceRoot });
   return list ?? [];

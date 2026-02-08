@@ -1,5 +1,5 @@
 /**
- * Settings > Models: role dropdowns, Auto-pick, health indicator.
+ * Settings > Models: role dropdowns, Auto-pick, health indicator, Download recommended.
  * Does not scan C:\ — only allowed model dirs from backend.
  */
 
@@ -8,9 +8,18 @@ import type { ModelRolePaths } from "../core/types";
 import type { DiscoveredModelEntry, ModelMetadata } from "../core/models/modelRegistry";
 import {
   discoverModels,
+  getGlobalModelsDir,
+  downloadModelFile,
   parseModelMetadata,
   pickRecommended,
 } from "../core/models/modelRegistry";
+import {
+  RECOMMENDED_MODELS,
+  MANUAL_STEPS,
+  type RecommendedModelSpec,
+} from "../core/models/recommendedModels";
+
+type DownloadStatus = "idle" | "downloading" | "done" | "failed";
 
 const ROLES: { key: keyof ModelRolePaths; label: string }[] = [
   { key: "coder", label: "Coder" },
@@ -33,6 +42,13 @@ export function ModelsPanel({
 }: ModelsPanelProps) {
   const [entries, setEntries] = useState<DiscoveredModelEntry[]>([]);
   const [loading, setLoading] = useState(false);
+  const [globalModelsDir, setGlobalModelsDir] = useState<string | null>(null);
+  const [downloadStatus, setDownloadStatus] = useState<Record<string, DownloadStatus>>({});
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    getGlobalModelsDir().then(setGlobalModelsDir).catch(() => setGlobalModelsDir(null));
+  }, []);
 
   const refresh = useCallback(async () => {
     if (!workspaceRoot) {
@@ -77,6 +93,34 @@ export function ModelsPanel({
   const healthCoder = currentCoder && entries.some((e) => e.absolute_path === currentCoder);
   const healthGeneral = currentGeneral && entries.some((e) => e.absolute_path === currentGeneral);
 
+  const startDownload = useCallback(
+    async (model: RecommendedModelSpec) => {
+      if (!globalModelsDir) {
+        setDownloadError("Global models dir not available.");
+        return;
+      }
+      const destPath = `${globalModelsDir.replace(/\/+$/, "")}/${model.filename}`;
+      setDownloadStatus((s) => ({ ...s, [model.filename]: "downloading" }));
+      setDownloadError(null);
+      try {
+        await downloadModelFile(model.url, destPath);
+        setDownloadStatus((s) => ({ ...s, [model.filename]: "done" }));
+        if (workspaceRoot) await refresh();
+      } catch (e) {
+        const msg = String(e);
+        setDownloadStatus((s) => ({ ...s, [model.filename]: "failed" }));
+        setDownloadError(`${MANUAL_STEPS}\n\nTarget folder: ${globalModelsDir}\n\nError: ${msg}`);
+      }
+    },
+    [globalModelsDir, workspaceRoot, refresh]
+  );
+
+  const downloadAll = useCallback(async () => {
+    for (const model of RECOMMENDED_MODELS) {
+      await startDownload(model);
+    }
+  }, [startDownload]);
+
   return (
     <div className="models-panel">
       <div className="models-panel-header">
@@ -119,6 +163,47 @@ export function ModelsPanel({
               </select>
             </div>
           ))}
+          <div className="models-panel-downloads">
+            <div className="models-panel-downloads-header">
+              <span className="models-panel-title">Recommended models</span>
+              <button
+                type="button"
+                className="btn secondary"
+                disabled={!globalModelsDir || RECOMMENDED_MODELS.some((m) => downloadStatus[m.filename] === "downloading")}
+                onClick={downloadAll}
+              >
+                Download all
+              </button>
+            </div>
+            {RECOMMENDED_MODELS.map((model) => {
+              const status = downloadStatus[model.filename] ?? "idle";
+              return (
+                <div key={model.filename} className="models-panel-download-row">
+                  <span className="models-panel-download-label">{model.label}</span>
+                  <span className="models-panel-download-filename">{model.filename}</span>
+                  <span className={`models-panel-download-status status-${status}`}>
+                    {status === "idle" && "—"}
+                    {status === "downloading" && "Downloading…"}
+                    {status === "done" && "Done"}
+                    {status === "failed" && "Failed"}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn secondary"
+                    disabled={!globalModelsDir || status === "downloading"}
+                    onClick={() => startDownload(model)}
+                  >
+                    Download
+                  </button>
+                </div>
+              );
+            })}
+            {downloadError && (
+              <div className="models-panel-download-error">
+                <pre>{downloadError}</pre>
+              </div>
+            )}
+          </div>
         </>
       )}
     </div>

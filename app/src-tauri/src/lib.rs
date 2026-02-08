@@ -1,3 +1,4 @@
+mod downloads;
 mod project_root;
 mod runtime;
 mod toolroot;
@@ -32,6 +33,7 @@ pub fn run() {
             toolroot::scan_models_for_gguf,
             toolroot::scan_models_for_gguf_by_mtime,
             toolroot::tool_root_exists,
+            downloads::download_file,
             runtime::runtime_health_check,
             runtime::runtime_start,
             runtime::runtime_chat,

@@ -528,6 +528,65 @@
   padding: 4px 6px;
 }
 
+.models-panel-downloads {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e0e0e0;
+}
+
+.models-panel-downloads-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.models-panel-download-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.models-panel-download-label {
+  font-weight: 500;
+  min-width: 140px;
+  font-size: 12px;
+}
+
+.models-panel-download-filename {
+  font-size: 11px;
+  color: #666;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.models-panel-download-status {
+  font-size: 11px;
+  min-width: 80px;
+}
+
+.models-panel-download-status.status-done { color: #080; }
+.models-panel-download-status.status-failed { color: #c00; }
+.models-panel-download-status.status-downloading { color: #06c; }
+
+.models-panel-download-error {
+  margin-top: 8px;
+  padding: 8px;
+  background: #fff0f0;
+  border: 1px solid #fcc;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.models-panel-download-error pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .local-settings .local-advanced {
   display: flex;
   flex-direction: column;
