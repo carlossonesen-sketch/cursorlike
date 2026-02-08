@@ -37,6 +37,7 @@ pub fn run() {
             toolroot::tool_root_exists,
             downloads::download_file,
             runtime::runtime_health_check,
+            runtime::runtime_health_probe,
             runtime::runtime_start,
             runtime::runtime_chat,
             runtime::runtime_status,

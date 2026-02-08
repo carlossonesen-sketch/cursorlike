@@ -6,7 +6,7 @@ import {
   ensureLogDir,
   type StartLocalModelStatus,
 } from "../core/runtime/runtimeConfig";
-import { runtimeStatus, getRuntimeLogLines, getResolvedToolRoot } from "../core/runtime/runtimeApi";
+import { runtimeStatus, getRuntimeLogLines, getResolvedToolRoot, runtimeHealthProbe, getRuntimeBaseUrl } from "../core/runtime/runtimeApi";
 
 type ServerStatus = "—" | "starting" | "running" | "error";
 type PanelSize = "small" | "medium" | "large";
@@ -15,6 +15,7 @@ interface RuntimeStatusPanelProps {
   workspaceRoot: string | null;
   toolRoot?: string | null;
   port?: number;
+  runtimePort?: number | null;
   activeGgufPath?: string | null;
   ggufPathMissing?: string | null;
 }
@@ -33,6 +34,7 @@ export function RuntimeStatusPanel({
   workspaceRoot,
   toolRoot: toolRootProp,
   port: portProp,
+  runtimePort,
   activeGgufPath,
   ggufPathMissing,
 }: RuntimeStatusPanelProps) {
@@ -64,6 +66,10 @@ export function RuntimeStatusPanel({
       const r = await detectRuntimeStatus(workspaceRoot);
       setRuntimeFound(r.runtimeFound);
       setModelFound(r.modelFound);
+      if (r.running && r.port != null) {
+        setServerStatus("running");
+        setCurrentPort(r.port);
+      } else if (r.port != null) setCurrentPort(r.port);
       setPaths({
         workspaceRoot: r.workspaceRoot,
         toolRoot: r.toolRoot,
@@ -181,6 +187,21 @@ export function RuntimeStatusPanel({
   }, [logRoot, detect]);
 
   const [currentPort, setCurrentPort] = useState<number | null>(null);
+  const [healthEndpoint, setHealthEndpoint] = useState<string | null>(null);
+
+  const effectivePort = runtimePort ?? currentPort ?? portProp ?? null;
+  const baseUrl = effectivePort != null ? getRuntimeBaseUrl(effectivePort) : null;
+
+  useEffect(() => {
+    const port = runtimePort ?? currentPort ?? portProp ?? null;
+    if (port == null || serverStatus !== "running") {
+      setHealthEndpoint(null);
+      return;
+    }
+    runtimeHealthProbe(port).then((r) => {
+      setHealthEndpoint(r.healthy && r.endpoint ? r.endpoint : null);
+    }).catch(() => setHealthEndpoint(null));
+  }, [runtimePort, currentPort, portProp, serverStatus]);
 
   const handleCopyDebugInfo = useCallback(async () => {
     let resolved = paths.toolRoot ?? "";
@@ -189,7 +210,7 @@ export function RuntimeStatusPanel({
     } catch {
       /* use paths.toolRoot */
     }
-    const port = currentPort ?? portProp ?? 11435;
+    const port = effectivePort ?? portProp ?? null;
     const lines = [
       "resolvedToolRoot=" + resolved,
       "activeGgufPath=" + (activeGgufPath ?? ""),
@@ -201,7 +222,7 @@ export function RuntimeStatusPanel({
     } catch {
       /* ignore */
     }
-  }, [paths.toolRoot, toolRootProp, currentPort, portProp, activeGgufPath, lastError]);
+  }, [paths.toolRoot, toolRootProp, effectivePort, portProp, activeGgufPath, lastError]);
 
   return (
     <div className={`runtime-status-panel runtime-status-size-${size}`}>
@@ -256,11 +277,25 @@ export function RuntimeStatusPanel({
               <span className="runtime-status-label">Server</span>
               <span className="runtime-status-value">{serverStatus}</span>
             </div>
-            {(portProp != null || currentPort != null) && (
+            {effectivePort != null && (
               <div className="runtime-status-row">
                 <span className="runtime-status-label">Port</span>
-                <span className="runtime-status-value">{String(currentPort ?? portProp ?? "")}</span>
+                <span className="runtime-status-value">{String(effectivePort)}</span>
               </div>
+            )}
+            {baseUrl != null && (
+              <>
+                <div className="runtime-status-row runtime-status-path">
+                  <span className="runtime-status-label">Runtime base URL</span>
+                  <code className="runtime-status-path-value">{baseUrl}</code>
+                </div>
+                {healthEndpoint != null && (
+                  <div className="runtime-status-row">
+                    <span className="runtime-status-label">Health</span>
+                    <span className="runtime-status-value">healthy via {healthEndpoint}</span>
+                  </div>
+                )}
+              </>
             )}
           </div>
           {(ggufPathMissing || lastError || lastResult != null || createLogDirResult != null) && (
@@ -361,7 +396,7 @@ export function RuntimeStatusPanel({
                 <CopyablePath label="activeGgufPath" path={activeGgufPath ?? ""} />
                 <div className="runtime-status-row runtime-status-path">
                   <span className="runtime-status-label">port</span>
-                  <code className="runtime-status-path-value">{String(currentPort ?? portProp ?? "—")}</code>
+                  <code className="runtime-status-path-value">{String(effectivePort ?? "—")}</code>
                 </div>
                 <CopyablePath label="logFilePath" path={paths.logFilePath} />
                 <CopyablePath label="runtimeConfigPath" path={paths.runtimeConfigPath} />

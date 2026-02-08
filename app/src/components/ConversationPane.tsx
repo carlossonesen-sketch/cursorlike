@@ -11,6 +11,7 @@ import type {
 } from "../core/types";
 import type { ResumeSuggestion } from "../core";
 import type { Provider, LocalModelSettings, ModelRolePaths } from "../core";
+import { getResolvedToolRoot, getGlobalModelsDir } from "../core";
 
 export type AppState = "idle" | "patchProposed" | "patchApplied";
 
@@ -47,6 +48,7 @@ interface ConversationPaneProps {
   onProviderChange: (value: Provider) => void;
   toolRoot: string | null;
   port?: number;
+  runtimePort?: number | null;
   activeGgufPath?: string | null;
   ggufPathMissing?: string | null;
   localSettings: LocalModelSettings;
@@ -92,6 +94,7 @@ export function ConversationPane({
   onProviderChange: _onProviderChange,
   toolRoot,
   port,
+  runtimePort,
   activeGgufPath,
   ggufPathMissing,
   localSettings,
@@ -113,7 +116,22 @@ export function ConversationPane({
   const [knowledgeExpanded, setKnowledgeExpanded] = useState(false);
   const [expandedChunkIndices, setExpandedChunkIndices] = useState<Set<number>>(new Set());
   const [advancedExpanded, setAdvancedExpanded] = useState(false);
+  const [runtimeToolRootError, setRuntimeToolRootError] = useState<string | null>(null);
+  const [expectedExePath, setExpectedExePath] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (provider !== "local" || !workspaceRoot) {
+      setRuntimeToolRootError(null);
+      return;
+    }
+    getResolvedToolRoot(toolRoot ?? null)
+      .then(() => setRuntimeToolRootError(null))
+      .catch((e) => setRuntimeToolRootError(String(e)));
+    getGlobalModelsDir()
+      .then((dir) => setExpectedExePath(dir.replace(/\/models\/?$/, "") + "/runtime/llama/llama-server.exe"))
+      .catch(() => setExpectedExePath(null));
+  }, [provider, workspaceRoot, toolRoot]);
 
   const CHUNK_PREVIEW_LEN = 300;
 
@@ -163,6 +181,7 @@ export function ConversationPane({
             workspaceRoot={workspaceRoot}
             toolRoot={toolRoot}
             port={port}
+            runtimePort={runtimePort}
             activeGgufPath={activeGgufPath ?? undefined}
             ggufPathMissing={ggufPathMissing ?? undefined}
           />
@@ -276,12 +295,15 @@ export function ConversationPane({
         <div className="model-settings">
           {provider === "local" && (
             <>
-              {!toolRoot && workspaceRoot && (
-                <p className="local-error-msg">
-                  Could not find runtime/llama/llama-server.exe. Expected under toolRoot/runtime/llama.
-                </p>
+              {runtimeToolRootError && (
+                <div className="local-error-msg">
+                  <p>{runtimeToolRootError}</p>
+                  {expectedExePath && (
+                    <p>Put <code>llama-server.exe</code> at: <code title={expectedExePath}>{expectedExePath}</code></p>
+                  )}
+                </div>
               )}
-              {toolRoot && !localSettings.ggufPath?.trim() && (
+              {toolRoot && !localSettings.ggufPath?.trim() && !runtimeToolRootError && (
                 <p className="local-no-gguf-msg">
                   Drop a .gguf into <code>{toolRoot.replace(/\\/g, "/").replace(/\/+$/, "")}/models</code>
                 </p>

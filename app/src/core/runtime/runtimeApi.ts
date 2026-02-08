@@ -32,6 +32,11 @@ export const DEFAULT_LOCAL_SETTINGS: LocalModelSettings = {
   context_length: 4096,
 };
 
+/** Build runtime base URL from port (single source: use backend-reported or configured port). */
+export function getRuntimeBaseUrl(port: number): string {
+  return `http://127.0.0.1:${port}`;
+}
+
 export interface RuntimeStartResult {
   port: number;
 }
@@ -94,9 +99,19 @@ export async function pathExists(path: string): Promise<boolean> {
   return invoke<boolean>("path_exists", { path: path ?? "" });
 }
 
-/** GET http://127.0.0.1:port/health; true if 200. */
+/** Probe /v1/models, /health, /healthz (in order); true if any returns 200. */
 export async function runtimeHealthCheck(port: number): Promise<boolean> {
   return invoke<boolean>("runtime_health_check", { port });
+}
+
+export interface RuntimeHealthProbeResult {
+  healthy: boolean;
+  endpoint: string | null;
+}
+
+/** Probe and return which endpoint succeeded (for UI). */
+export async function runtimeHealthProbe(port: number): Promise<RuntimeHealthProbeResult> {
+  return invoke<RuntimeHealthProbeResult>("runtime_health_probe", { port });
 }
 
 export function resolveModelPath(toolRoot: string, relPath: string): string {
@@ -157,20 +172,20 @@ export async function runtimeGenerate(
   });
 }
 
-/** Ensure local runtime is running; start with toolRoot/model/port if not. Backend resolves tool root (global fallback). Throws if model missing or start fails. */
+/** Ensure local runtime is running; start with toolRoot/model/port if not. Returns the port the backend reports (source of truth). */
 export async function ensureLocalRuntime(
   settings: LocalModelSettings,
   toolRoot: string | null,
   port?: number | null
 ): Promise<number> {
   const status = await runtimeStatus();
-  const usePort = port ?? DEFAULT_PORT;
-  if (status.running && status.port === usePort) {
-    return usePort;
+  if (status.running && status.port != null) {
+    return status.port;
   }
   if (!settings.ggufPath?.trim()) {
     throw new Error("GGUF model path is required for local provider. Add a .gguf in Settings > Models.");
   }
+  const usePort = port ?? DEFAULT_PORT;
   const result = await runtimeStart(settings.ggufPath, toolRoot, {
     temperature: settings.temperature,
     top_p: settings.top_p,

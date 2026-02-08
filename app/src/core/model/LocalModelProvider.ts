@@ -9,6 +9,7 @@ import {
   ensureLocalRuntime,
   runtimeGenerate,
   runtimeChat,
+  getRuntimeBaseUrl,
   type LocalModelSettings,
   type GenerateOptions,
 } from "../runtime/runtimeApi";
@@ -99,7 +100,9 @@ export class LocalModelProvider implements IModelProvider {
 
   async generatePlanAndPatch(ctx: ModelContext): Promise<PlanAndPatch> {
     const settings = this.getSettings();
-    await ensureLocalRuntime(settings, this.getToolRoot(), this.getPort());
+    const port = await ensureLocalRuntime(settings, this.getToolRoot(), this.getPort());
+    const baseUrl = getRuntimeBaseUrl(port);
+    console.log("[runtime] request", "POST", baseUrl + "/completion");
     const prompt = buildCoderPrompt(ctx);
     const opts = this.getGenerateOptions();
     const raw = await runtimeGenerate(prompt, false, {
@@ -119,7 +122,9 @@ export class LocalModelProvider implements IModelProvider {
 
   async generateChatResponse(ctx: ModelContext): Promise<string> {
     const settings = this.getSettings();
-    await ensureLocalRuntime(settings, this.getToolRoot(), this.getPort());
+    const port = await ensureLocalRuntime(settings, this.getToolRoot(), this.getPort());
+    const baseUrl = getRuntimeBaseUrl(port);
+    console.log("[runtime] request", "POST", baseUrl + "/v1/chat/completions");
     const userPrompt = buildChatUserPrompt(ctx);
     const opts = this.getGenerateOptions();
     const maxTokens = Math.min(512, opts.max_tokens ?? settings.max_tokens);

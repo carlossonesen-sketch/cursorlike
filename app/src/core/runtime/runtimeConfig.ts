@@ -7,9 +7,11 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   findToolRoot,
   getResolvedToolRoot,
+  getRuntimeBaseUrl,
   resolveModelPath,
   runtimeStart,
   runtimeHealthCheck,
+  runtimeStatus,
 } from "./runtimeApi";
 
 const CONFIG_PATH = ".devassistant/runtime_config.json";
@@ -111,6 +113,12 @@ function appendRuntimeLogMarker(logRoot: string, line: string): Promise<void> {
 export interface DetectRuntimeStatusResult {
   runtimeFound: boolean;
   modelFound: boolean;
+  /** True when backend reports runtime running. */
+  running: boolean;
+  /** Port reported by backend when runtime is running; null otherwise. */
+  port: number | null;
+  /** Base URL when running: http://127.0.0.1:<port>. */
+  baseUrl: string | null;
   /** Absolute workspace root (folder user opened, resolved). */
   workspaceRoot: string;
   /** Absolute tool root (first dir with runtime/llama + models/), or null. */
@@ -125,9 +133,12 @@ export async function detectRuntimeStatus(
   workspaceRoot: string
 ): Promise<DetectRuntimeStatusResult> {
   const raw = workspaceRoot.replace(/\\/g, "/").replace(/\/+$/, "");
-  const empty = {
+  const empty: DetectRuntimeStatusResult = {
     runtimeFound: false,
     modelFound: false,
+    running: false,
+    port: null,
+    baseUrl: null,
     workspaceRoot: "",
     toolRoot: null,
     logFilePath: "",
@@ -163,10 +174,23 @@ export async function detectRuntimeStatus(
 
   const runtimeFound = resolvedToolRoot != null;
   const scan = await scanModelsByMtime(projectRoot);
+  let running = false;
+  let port: number | null = null;
+  try {
+    const s = await runtimeStatus();
+    running = s.running;
+    if (s.running && s.port != null) port = s.port;
+  } catch {
+    /* ignore */
+  }
+  const baseUrl = port != null ? getRuntimeBaseUrl(port) : null;
 
   return {
     runtimeFound,
     modelFound: !!scan,
+    running,
+    port,
+    baseUrl,
     workspaceRoot: root,
     toolRoot: resolvedToolRoot ?? findRoot,
     logFilePath,
@@ -288,6 +312,11 @@ export async function startLocalModel(
     await writeRuntimeConfig(baseDir, cfg).catch(() => {});
     const marker = `[runtime] startLocalModel ${iso} status=already_running model=${modelAbs} port=${port}`;
     await appendRuntimeLogMarker(baseDir, marker).catch(() => {});
+    try {
+      await runtimeStart(modelAbs, resolvedToolRoot, { context_length: DEFAULT_CTX }, port, logPath);
+    } catch {
+      /* backend attach best-effort; UI already has port */
+    }
     return { status: "already_running", details: `Port ${port} in use (health OK).` };
   }
 

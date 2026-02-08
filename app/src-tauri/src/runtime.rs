@@ -48,11 +48,44 @@ pub struct GenerateOptions {
 }
 
 const DEFAULT_PORT: u16 = 11435;
+const HEALTH_TIMEOUT_MS: u64 = 1000;
 
-/// Check 8080..8099 for an already-running server (health 200). Returns port if found.
+/// Probe order: /v1/models (OpenAI-compatible), /health, /healthz. Returns (true, endpoint) if any returns 200.
+async fn probe_runtime_health(port: u16) -> (bool, Option<String>) {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_millis(HEALTH_TIMEOUT_MS))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return (false, None),
+    };
+    let endpoints = ["/v1/models", "/health", "/healthz"];
+    for ep in endpoints {
+        let url = format!("http://127.0.0.1:{}{}", port, ep);
+        if let Ok(resp) = client.get(&url).send().await {
+            if resp.status().as_u16() == 200 {
+                return (true, Some(ep.to_string()));
+            }
+        }
+    }
+    (false, None)
+}
+
+/// Check for already-running server: DEFAULT_PORT first, then 11436..11550, then 8080..8099.
 async fn find_already_running_port() -> Option<u16> {
+    let (ok, _) = probe_runtime_health(DEFAULT_PORT).await;
+    if ok {
+        return Some(DEFAULT_PORT);
+    }
+    for port in (DEFAULT_PORT + 1)..=11550u16 {
+        let (ok, _) = probe_runtime_health(port).await;
+        if ok {
+            return Some(port);
+        }
+    }
     for port in 8080u16..8100u16 {
-        if runtime_health_check(port).await.ok() == Some(true) {
+        let (ok, _) = probe_runtime_health(port).await;
+        if ok {
             return Some(port);
         }
     }
@@ -88,14 +121,24 @@ fn resolve_llama_from_tool_root(tool_root: &std::path::Path) -> Result<PathBuf, 
     ))
 }
 
-/// Health check: GET http://127.0.0.1:port/health, return true if 200.
+/// Health check: probe /v1/models, /health, /healthz (in order); return true if any returns 200.
 #[tauri::command]
 pub async fn runtime_health_check(port: u16) -> Result<bool, String> {
-    let url = format!("http://127.0.0.1:{}/health", port);
-    match reqwest::get(&url).await {
-        Ok(resp) => Ok(resp.status().as_u16() == 200),
-        Err(_) => Ok(false),
-    }
+    let (ok, _) = probe_runtime_health(port).await;
+    Ok(ok)
+}
+
+/// Health probe returning which endpoint succeeded (for UI). Returns { healthy, endpoint }.
+#[derive(serde::Serialize)]
+pub struct RuntimeHealthProbeResult {
+    pub healthy: bool,
+    pub endpoint: Option<String>,
+}
+
+#[tauri::command]
+pub async fn runtime_health_probe(port: u16) -> Result<RuntimeHealthProbeResult, String> {
+    let (healthy, endpoint) = probe_runtime_health(port).await;
+    Ok(RuntimeHealthProbeResult { healthy, endpoint })
 }
 
 #[tauri::command]
@@ -126,7 +169,7 @@ pub async fn runtime_start(
     );
     let server_path = resolve_llama_from_tool_root(&resolved_root)?;
 
-    // Port: already running on 8080..8099? Else use override or pick 11435 / 11436..11550.
+    // Port: already running on default/8080..8099? Else use override or pick 11435 / 11436..11550.
     let port = if let Some(p) = port_override {
         p
     } else if let Some(p) = find_already_running_port().await {
@@ -137,6 +180,15 @@ pub async fn runtime_start(
     } else {
         find_preferred_port().ok_or("No free port in 11435..11550.")?
     };
+
+    // If this port is already healthy (e.g. server started elsewhere), attach without spawning.
+    let (already_healthy, _) = probe_runtime_health(port).await;
+    if already_healthy {
+        let mut s = state.lock().map_err(|e| e.to_string())?;
+        s.port = Some(port);
+        s.child = None;
+        return Ok(RuntimeStartResult { port });
+    }
 
     {
         let mut s = state.lock().map_err(|e| e.to_string())?;
@@ -195,14 +247,12 @@ pub async fn runtime_start(
         s.child = Some(child);
     }
 
-    // Poll every 1s for up to 180s (model load can take 30s+). 503 = "starting", keep waiting.
+    // Poll every 1s for up to 180s (model load can take 30s+). Use robust probe.
     for _ in 0..180 {
         tokio::time::sleep(Duration::from_secs(1)).await;
-        let url = format!("http://127.0.0.1:{}/health", port);
-        if let Ok(resp) = reqwest::get(&url).await {
-            if resp.status().as_u16() == 200 {
-                return Ok(RuntimeStartResult { port });
-            }
+        let (ok, _) = probe_runtime_health(port).await;
+        if ok {
+            return Ok(RuntimeStartResult { port });
         }
     }
 
@@ -218,22 +268,33 @@ pub async fn runtime_start(
 pub async fn runtime_status(
     state: tauri::State<'_, Mutex<RuntimeState>>,
 ) -> Result<RuntimeStatusResult, String> {
-    let mut s = state.lock().map_err(|e| e.to_string())?;
-    let running = if let Some(child) = s.child.as_mut() {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                s.child = None;
-                s.port = None;
-                false
+    let port_to_probe = {
+        let mut s = state.lock().map_err(|e| e.to_string())?;
+        let mut running = false;
+        if let Some(child) = s.child.as_mut() {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    s.child = None;
+                    s.port = None;
+                }
+                Ok(None) => running = true,
+                Err(_) => {}
             }
-            Ok(None) => true,
-            Err(_) => false,
         }
-    } else {
-        false
+        if running {
+            return Ok(RuntimeStatusResult { running: true, port: s.port });
+        }
+        s.port
     };
-    let port = if running { s.port } else { None };
-    Ok(RuntimeStatusResult { running, port })
+    if let Some(port) = port_to_probe {
+        let (healthy, _) = probe_runtime_health(port).await;
+        if healthy {
+            return Ok(RuntimeStatusResult { running: true, port: Some(port) });
+        }
+        let mut s = state.lock().map_err(|e| e.to_string())?;
+        s.port = None;
+    }
+    Ok(RuntimeStatusResult { running: false, port: None })
 }
 
 #[tauri::command]

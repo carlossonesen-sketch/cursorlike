@@ -37,6 +37,7 @@ import {
   getSnapshotOutputPath,
   ensureLocalRuntime,
   pathExists,
+  runtimeStatus,
 } from "./core";
 import type {
   FileTreeNode,
@@ -133,6 +134,7 @@ export default function App() {
   const [modelRoles, setModelRoles] = useState<ModelRolePaths | undefined>(undefined);
   const [toolRoot, setToolRoot] = useState<string | null>(null);
   const [port, setPort] = useState<number>(11435);
+  const [runtimePort, setRuntimePort] = useState<number | null>(null);
   const [ggufPathMissing, setGgufPathMissing] = useState<string | null>(null);
   const [provider, setProvider] = useState<Provider>("local");
   const [localSettings, setLocalSettings] = useState<LocalModelSettings>(() => ({
@@ -142,9 +144,11 @@ export default function App() {
   const localSettingsRef = useRef(localSettings);
   const toolRootRef = useRef<string | null>(null);
   const portRef = useRef<number>(11435);
+  const runtimePortRef = useRef<number | null>(null);
   localSettingsRef.current = localSettings;
   toolRootRef.current = toolRoot;
   portRef.current = port;
+  runtimePortRef.current = runtimePort;
 
   useEffect(() => {
     if (provider === "local") {
@@ -152,14 +156,14 @@ export default function App() {
         new LocalModelProvider(
           () => localSettingsRef.current,
           () => toolRootRef.current,
-          () => portRef.current ?? 11435,
+          () => runtimePortRef.current ?? portRef.current ?? 11435,
           () => ({})
         )
       );
     } else {
       setModelProvider(new MockModelProvider());
     }
-  }, [provider]);
+  }, [provider, runtimePort]);
 
   const runLocalModelAutoScan = useCallback(async () => {
     const root = workspace.root;
@@ -213,10 +217,8 @@ export default function App() {
           toolRoot,
           port
         )
-          .then(() => {
-            if (!cancelled) {
-              // Runtime started or already running; status panel will show it.
-            }
+          .then((usedPort) => {
+            if (!cancelled) setRuntimePort(usedPort);
           })
           .catch((e) => {
             if (!cancelled) console.warn("[App] auto-start runtime:", e);
@@ -229,6 +231,19 @@ export default function App() {
       cancelled = true;
     };
   }, [provider, workspacePath, toolRoot, port, localSettings, modelRoles]);
+
+  useEffect(() => {
+    if (provider !== "local" || !workspacePath) return;
+    const poll = () => {
+      runtimeStatus().then((s) => {
+        if (s.running && s.port != null) setRuntimePort(s.port);
+        else setRuntimePort(null);
+      }).catch(() => setRuntimePort(null));
+    };
+    poll();
+    const t = setInterval(poll, 5000);
+    return () => clearInterval(t);
+  }, [provider, workspacePath]);
 
   const pickGGUFFile = useCallback(async () => {
     const selected = await open({
@@ -725,13 +740,13 @@ export default function App() {
                   planner: new LocalPlannerAgent(
                     () => localSettingsRef.current,
                     () => toolRootRef.current,
-                    () => portRef.current ?? 11435,
+                    () => runtimePortRef.current ?? portRef.current ?? 11435,
                     () => ({})
                   ),
                   reviewer: new LocalReviewerAgent(
                     () => localSettingsRef.current,
                     () => toolRootRef.current,
-                    () => portRef.current ?? 11435,
+                    () => runtimePortRef.current ?? portRef.current ?? 11435,
                     () => ({})
                   ),
                 }
@@ -1155,6 +1170,7 @@ export default function App() {
           onProviderChange={setProvider}
           toolRoot={toolRoot}
           port={port}
+          runtimePort={runtimePort}
           activeGgufPath={(modelRoles?.coder ?? localSettings.ggufPath ?? "").trim() || null}
           ggufPathMissing={ggufPathMissing}
           localSettings={localSettings}
