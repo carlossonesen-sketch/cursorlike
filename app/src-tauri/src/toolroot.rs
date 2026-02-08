@@ -31,10 +31,17 @@ const LLAMA_EXE_ALT: &str = "runtime/llama/llama-server.exe";
 const MODELS_DIR: &str = "models";
 const GGUF_EXT: &str = ".gguf";
 const PREFER_PATTERN: &[&str] = &["coder", "code", "instruct"];
+/// Prefer small/fast model for default (e.g. Qwen2.5-Coder-0.5B) when present.
+const SMALL_PREFER_PATTERN: &[&str] = &["0.5b", "qwen2.5-coder-0.5b"];
 
 fn name_preferred(name: &str) -> bool {
     let lower = name.to_lowercase();
     PREFER_PATTERN.iter().any(|p| lower.contains(p))
+}
+
+fn name_is_small_preferred(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    SMALL_PREFER_PATTERN.iter().any(|p| lower.contains(p))
 }
 
 /// Walk up from workspace_root (up to 8 levels). First dir containing BOTH
@@ -70,14 +77,14 @@ pub fn tool_root_exists(tool_root: String, rel_path: String) -> Result<bool, Str
 }
 
 /// Scan tool_root/models for *.gguf. Returns toolRoot-relative path (e.g. models/foo.gguf) or None.
-/// If exactly 1 => pick it. If multiple => prefer filename containing coder|code|instruct, then largest size.
+/// If exactly 1 => pick it. If multiple => prefer small (0.5B) when present, else coder|code|instruct then largest size.
 #[tauri::command]
 pub fn scan_models_for_gguf(tool_root: String) -> Result<Option<String>, String> {
     let models_dir = Path::new(&tool_root).join(MODELS_DIR);
     if !models_dir.is_dir() {
         return Ok(None);
     }
-    let mut ggufs: Vec<(String, u64, bool)> = Vec::new();
+    let mut ggufs: Vec<(String, u64, bool, bool)> = Vec::new();
     for e in std::fs::read_dir(&models_dir).map_err(|e| e.to_string())? {
         let e = e.map_err(|e| e.to_string())?;
         let name = e.file_name().to_string_lossy().into_owned();
@@ -91,7 +98,8 @@ pub fn scan_models_for_gguf(tool_root: String) -> Result<Option<String>, String>
         let full = models_dir.join(&name);
         let size = std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
         let prefer = name_preferred(&name);
-        ggufs.push((rel, size, prefer));
+        let small = name_is_small_preferred(&name);
+        ggufs.push((rel, size, prefer, small));
     }
     if ggufs.is_empty() {
         return Ok(None);
@@ -100,10 +108,17 @@ pub fn scan_models_for_gguf(tool_root: String) -> Result<Option<String>, String>
         return Ok(Some(ggufs[0].0.clone()));
     }
     ggufs.sort_by(|a, b| {
-        if a.2 != b.2 {
-            return if a.2 { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater };
+        if a.3 != b.3 {
+            return if a.3 { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater };
         }
-        b.1.cmp(&a.1)
+        if a.3 {
+            a.1.cmp(&b.1)
+        } else {
+            if a.2 != b.2 {
+                return if a.2 { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater };
+            }
+            b.1.cmp(&a.1)
+        }
     });
     Ok(Some(ggufs[0].0.clone()))
 }
@@ -114,15 +129,15 @@ pub struct ScanModelsByMtimeResult {
     pub had_multiple: bool,
 }
 
-/// Scan tool_root/models for *.gguf. Pick by most recently modified.
-/// If multiple, pick newest and set had_multiple.
+/// Scan tool_root/models for *.gguf. Prefer small (0.5B) when present, else pick by most recently modified.
+/// If multiple, set had_multiple.
 #[tauri::command]
 pub fn scan_models_for_gguf_by_mtime(tool_root: String) -> Result<Option<ScanModelsByMtimeResult>, String> {
     let models_dir = Path::new(&tool_root).join(MODELS_DIR);
     if !models_dir.is_dir() {
         return Ok(None);
     }
-    let mut ggufs: Vec<(String, std::time::SystemTime)> = Vec::new();
+    let mut ggufs: Vec<(String, std::time::SystemTime, bool)> = Vec::new();
     for e in std::fs::read_dir(&models_dir).map_err(|e| e.to_string())? {
         let e = e.map_err(|e| e.to_string())?;
         let name = e.file_name().to_string_lossy().into_owned();
@@ -135,13 +150,19 @@ pub fn scan_models_for_gguf_by_mtime(tool_root: String) -> Result<Option<ScanMod
         let rel = format!("{}/{}", MODELS_DIR, name);
         let full = models_dir.join(&name);
         let mtime = std::fs::metadata(&full).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
-        ggufs.push((rel, mtime));
+        let small = name_is_small_preferred(&name);
+        ggufs.push((rel, mtime, small));
     }
     if ggufs.is_empty() {
         return Ok(None);
     }
     let had_multiple = ggufs.len() > 1;
-    ggufs.sort_by(|a, b| b.1.cmp(&a.1));
+    ggufs.sort_by(|a, b| {
+        if a.2 != b.2 {
+            return if a.2 { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater };
+        }
+        b.1.cmp(&a.1)
+    });
     Ok(Some(ScanModelsByMtimeResult {
         path: ggufs[0].0.clone(),
         had_multiple,
