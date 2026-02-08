@@ -35,8 +35,8 @@ fn collect_signals(dir: &Path) -> Vec<String> {
 /// or reach filesystem root.
 #[tauri::command]
 pub fn detect_project_root(start_path: String) -> Result<DetectResult, String> {
-    let trimmed = start_path.trim();
-    let start = Path::new(trimmed);
+    let start_trimmed = start_path.trim();
+    let start = Path::new(start_trimmed);
     let mut current = if start.is_dir() {
         start.canonicalize().map_err(|e| e.to_string())?
     } else if let Some(parent) = start.parent() {

@@ -8,8 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "snapshot:smoke": "npx tsx ../scripts/dev_snapshot_smoke.ts",
-    "test:intent": "npx tsx src/core/intent/intentRouting.test.ts"
+    "snapshot:smoke": "npx tsx ../scripts/dev_snapshot_smoke.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

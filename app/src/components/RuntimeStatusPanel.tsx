@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback } from "react";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   startLocalModel,
   detectRuntimeStatus,
   ensureLogDir,
   type StartLocalModelStatus,
 } from "../core/runtime/runtimeConfig";
-import { runtimeStatus } from "../core/runtime/runtimeApi";
+import { runtimeStatus, getRuntimeLogLines } from "../core/runtime/runtimeApi";
 
 type ServerStatus = "—" | "starting" | "running" | "error";
 type PanelSize = "small" | "medium" | "large";
@@ -40,6 +41,7 @@ export function RuntimeStatusPanel({ workspaceRoot }: RuntimeStatusPanelProps) {
     runtimeConfigPath: string;
   }>({ workspaceRoot: "", toolRoot: null, logFilePath: "", runtimeConfigPath: "" });
   const [createLogDirResult, setCreateLogDirResult] = useState<string | null>(null);
+  const [runtimeLogLines, setRuntimeLogLines] = useState<string[]>([]);
 
   const detect = useCallback(async () => {
     if (!workspaceRoot) {
@@ -84,6 +86,29 @@ export function RuntimeStatusPanel({ workspaceRoot }: RuntimeStatusPanelProps) {
     const t = setInterval(refreshRunning, 3000);
     return () => clearInterval(t);
   }, [serverStatus, refreshRunning]);
+
+  const refreshLogs = useCallback(async () => {
+    if (!paths.workspaceRoot) return;
+    try {
+      const lines = await getRuntimeLogLines(paths.workspaceRoot);
+      setRuntimeLogLines(lines);
+    } catch {
+      setRuntimeLogLines([]);
+    }
+  }, [paths.workspaceRoot]);
+
+  useEffect(() => {
+    if (!paths.workspaceRoot || !paths.logFilePath) return;
+    refreshLogs();
+    const t = setInterval(refreshLogs, 3000);
+    return () => clearInterval(t);
+  }, [paths.workspaceRoot, paths.logFilePath, refreshLogs]);
+
+  const handleOpenLogFolder = useCallback(() => {
+    if (!paths.logFilePath) return;
+    const logDir = paths.logFilePath.replace(/[\/\\][^\/\\]*$/, "");
+    if (logDir) revealItemInDir(logDir);
+  }, [paths.logFilePath]);
 
   const handleStart = useCallback(async () => {
     if (!workspaceRoot) return;
@@ -237,6 +262,28 @@ export function RuntimeStatusPanel({ workspaceRoot }: RuntimeStatusPanelProps) {
             >
               Create log dir
             </button>
+          </div>
+          <div className="runtime-status-log-wrap">
+            <div className="runtime-status-log-title">Runtime Logs</div>
+            <div className="runtime-status-log-actions">
+              <button type="button" className="btn secondary" disabled={!paths.workspaceRoot} onClick={refreshLogs}>
+                Refresh logs
+              </button>
+              <button type="button" className="btn secondary" disabled={!paths.logFilePath} onClick={handleOpenLogFolder}>
+                Open log folder
+              </button>
+            </div>
+            <div className="runtime-status-log" role="log">
+              {runtimeLogLines.length === 0 ? (
+                <div className="runtime-status-log-empty">No log lines. Start runtime or refresh.</div>
+              ) : (
+                runtimeLogLines.map((line, i) => (
+                  <div key={`log-${i}`} className="runtime-status-log-line">
+                    {line}
+                  </div>
+                ))
+              )}
+            </div>
           </div>
           <div className="runtime-status-details">
             <button

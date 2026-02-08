@@ -1,56 +1,18 @@
 //! Local llama-server runtime: start/stop/status and generate via HTTP /completion.
 
-use std::collections::HashMap;
-use std::collections::VecDeque;
-use std::io::BufRead;
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
-use tauri::Emitter;
-
-const RUNTIME_LOG_MAX_LINES: usize = 200;
 
 #[derive(Default)]
 pub struct RuntimeState {
     pub port: Option<u16>,
     pub child: Option<Child>,
 }
-
-/// Ring buffer of last RUNTIME_LOG_MAX_LINES lines from llama-server stdout/stderr.
-#[derive(Clone)]
-pub struct RuntimeLogState(pub Arc<Mutex<VecDeque<String>>>);
-
-impl Default for RuntimeLogState {
-    fn default() -> Self {
-        Self(Arc::new(Mutex::new(VecDeque::new())))
-    }
-}
-
-impl RuntimeLogState {
-    pub fn push(&self, line: String) {
-        let mut q = self.0.lock().unwrap();
-        if q.len() >= RUNTIME_LOG_MAX_LINES {
-            q.pop_front();
-        }
-        q.push_back(line);
-    }
-    pub fn clear(&self) {
-        self.0.lock().unwrap().clear();
-    }
-    pub fn lines(&self) -> Vec<String> {
-        self.0.lock().unwrap().iter().cloned().collect()
-    }
-}
-
-/// Per-run cancellation: run_id -> sender; when send(), the runtime_generate/runtime_chat waiting on the receiver returns Err.
-#[derive(Default)]
-pub struct CancelRunState(pub Mutex<HashMap<String, oneshot::Sender<()>>>);
 
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub struct RuntimeStartParams {
@@ -73,8 +35,6 @@ pub struct RuntimeStartResult {
 pub struct RuntimeStatusResult {
     pub running: bool,
     pub port: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pid: Option<u32>,
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
@@ -87,62 +47,15 @@ pub struct GenerateOptions {
     pub max_tokens: i32,
 }
 
-fn default_port() -> u16 {
-    std::env::var("LLAMA_PORT")
-        .ok()
-        .and_then(|s| s.trim().parse::<u16>().ok())
-        .unwrap_or(8080)
-}
-
-/// PATCH_TIMEOUT_SECONDS: timeout for patch generation (default 240 = 4 minutes).
-fn patch_timeout_seconds() -> u64 {
-    std::env::var("PATCH_TIMEOUT_SECONDS")
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .unwrap_or(240)
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct AppConfig {
-    pub patch_timeout_seconds: u64,
-}
-
-#[tauri::command]
-pub fn get_app_config() -> AppConfig {
-    AppConfig {
-        patch_timeout_seconds: patch_timeout_seconds(),
-    }
-}
-
-fn readiness_timeout_seconds() -> u64 {
-    std::env::var("LLAMA_READY_TIMEOUT_SECONDS")
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .unwrap_or(180)
-}
+const DEFAULT_PORT: u16 = 11435;
 
 fn find_free_port() -> Option<u16> {
-    let start = default_port();
-    for offset in 0u16..100 {
-        let port = start.saturating_add(offset);
+    for port in 8080u16..8100u16 {
         if TcpListener::bind(("127.0.0.1", port)).is_ok() {
             return Some(port);
         }
     }
     None
-}
-
-/// Use LLAMA_PORT if free, else next free port. Log when falling back.
-fn port_to_use() -> Option<u16> {
-    let want = default_port();
-    if TcpListener::bind(("127.0.0.1", want)).is_ok() {
-        return Some(want);
-    }
-    let fallback = find_free_port();
-    if let Some(p) = fallback {
-        eprintln!("[llama] port {} busy, using {}", want, p);
-    }
-    fallback
 }
 
 #[cfg(windows)]
@@ -166,31 +79,13 @@ fn resolve_llama_from_tool_root(tool_root: &str) -> Result<PathBuf, String> {
     ))
 }
 
-/// Health check: GET /health; if non-200, try GET /v1/models. Return true if any returns HTTP 200 (body ignored).
+/// Health check: GET http://127.0.0.1:port/health, return true if 200.
 #[tauri::command]
 pub async fn runtime_health_check(port: u16) -> Result<bool, String> {
-    let health_url = format!("http://127.0.0.1:{}/health", port);
-    if let Ok(resp) = reqwest::get(&health_url).await {
-        if resp.status().as_u16() == 200 {
-            return Ok(true);
-        }
-    }
-    let models_url = format!("http://127.0.0.1:{}/v1/models", port);
-    if let Ok(resp) = reqwest::get(&models_url).await {
-        if resp.status().as_u16() == 200 {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// Health check returning HTTP status code or error string for UI.
-#[tauri::command]
-pub async fn runtime_health_check_status(port: u16) -> Result<u16, String> {
-    let health_url = format!("http://127.0.0.1:{}/health", port);
-    match reqwest::get(&health_url).await {
-        Ok(resp) => Ok(resp.status().as_u16()),
-        Err(e) => Err(format!("connection failed: {}", e)),
+    let url = format!("http://127.0.0.1:{}/health", port);
+    match reqwest::get(&url).await {
+        Ok(resp) => Ok(resp.status().as_u16() == 200),
+        Err(_) => Ok(false),
     }
 }
 
@@ -200,9 +95,8 @@ pub async fn runtime_start(
     tool_root: Option<String>,
     params: Option<RuntimeStartParams>,
     port_override: Option<u16>,
-    _log_file_path: Option<String>,
+    log_file_path: Option<String>,
     state: tauri::State<'_, Mutex<RuntimeState>>,
-    log_state: tauri::State<'_, RuntimeLogState>,
 ) -> Result<RuntimeStartResult, String> {
     let gguf_path = gguf_path.trim();
     if gguf_path.is_empty() {
@@ -215,9 +109,7 @@ pub async fn runtime_start(
 
     let (server_path, port) = if let Some(tr) = &tool_root {
         let server_path = resolve_llama_from_tool_root(tr)?;
-        let port = port_override
-            .or_else(port_to_use)
-            .ok_or_else(|| format!("No free port near {}.", default_port()))?;
+        let port = port_override.unwrap_or(DEFAULT_PORT);
         {
             let mut s = state.lock().map_err(|e| e.to_string())?;
             if s.port == Some(port) {
@@ -246,8 +138,8 @@ pub async fn runtime_start(
         }
         let server_path = candidate.canonicalize().map_err(|e| e.to_string())?;
         let port = port_override
-            .or_else(port_to_use)
-            .ok_or_else(|| format!("No free port near {}.", default_port()))?;
+            .or_else(find_free_port)
+            .ok_or("No free port in 8080..8099.")?;
         (server_path, port)
     };
 
@@ -265,36 +157,26 @@ pub async fn runtime_start(
         args.push(p.context_length.to_string());
     }
 
-    log_state.clear();
-    let mut child = Command::new(&server_path)
+    let (stdout, stderr) = if let Some(ref log_path) = log_file_path {
+        let p = PathBuf::from(log_path);
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).append(true).write(true);
+        let f1 = opts.open(&p).map_err(|e| format!("Failed to open log file: {}", e))?;
+        let f2 = opts.open(&p).map_err(|e| format!("Failed to open log file: {}", e))?;
+        (Stdio::from(f1), Stdio::from(f2))
+    } else {
+        (Stdio::null(), Stdio::null())
+    };
+
+    let child = Command::new(&server_path)
         .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(stdout)
+        .stderr(stderr)
         .spawn()
         .map_err(|e| format!("Failed to start llama-server: {}", e))?;
-
-    let stdout = child.stdout.take().ok_or("stdout not captured")?;
-    let stderr = child.stderr.take().ok_or("stderr not captured")?;
-    let arc_log_out = log_state.0.clone();
-    let arc_log_err = log_state.0.clone();
-    std::thread::spawn(move || {
-        let log_out = RuntimeLogState(arc_log_out);
-        let r = std::io::BufReader::new(stdout);
-        for line in r.lines() {
-            if let Ok(l) = line {
-                log_out.push(l);
-            }
-        }
-    });
-    std::thread::spawn(move || {
-        let log_err = RuntimeLogState(arc_log_err);
-        let r = std::io::BufReader::new(stderr);
-        for line in r.lines() {
-            if let Ok(l) = line {
-                log_err.push(l);
-            }
-        }
-    });
 
     {
         let mut s = state.lock().map_err(|e| e.to_string())?;
@@ -305,67 +187,23 @@ pub async fn runtime_start(
         s.child = Some(child);
     }
 
-    let timeout_secs = readiness_timeout_seconds();
-    let args_debug = args.join(" ");
-
-    for elapsed_secs in 1..=timeout_secs {
+    // Poll every 1s for up to 180s (model load can take 30s+). 503 = "starting", keep waiting.
+    for _ in 0..180 {
         tokio::time::sleep(Duration::from_secs(1)).await;
-
-        let health_url = format!("http://127.0.0.1:{}/health", port);
-        match reqwest::get(&health_url).await {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                eprintln!("[llama readiness] elapsedSeconds={} url={} httpStatus={}", elapsed_secs, health_url, status);
-                if status == 200 {
-                    return Ok(RuntimeStartResult { port });
-                }
-            }
-            Err(_) => {
-                eprintln!("[llama readiness] elapsedSeconds={} url={} httpStatus=(request failed)", elapsed_secs, health_url);
-            }
-        }
-
-        let models_url = format!("http://127.0.0.1:{}/v1/models", port);
-        match reqwest::get(&models_url).await {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                eprintln!("[llama readiness] elapsedSeconds={} url={} httpStatus={}", elapsed_secs, models_url, status);
-                if status == 200 {
-                    return Ok(RuntimeStartResult { port });
-                }
-            }
-            Err(_) => {
-                eprintln!("[llama readiness] elapsedSeconds={} url={} httpStatus=(request failed)", elapsed_secs, models_url);
+        let url = format!("http://127.0.0.1:{}/health", port);
+        if let Ok(resp) = reqwest::get(&url).await {
+            if resp.status().as_u16() == 200 {
+                return Ok(RuntimeStartResult { port });
             }
         }
     }
 
     let mut s = state.lock().map_err(|e| e.to_string())?;
-    let last_output: String = log_state.lines().join("\n");
-    let last_output_trim = if last_output.len() > 2000 {
-        format!("...{}", last_output.get(last_output.len().saturating_sub(2000)..).unwrap_or(""))
-    } else {
-        last_output
-    };
     if let Some(mut child) = s.child.take() {
         let _ = child.kill();
     }
     s.port = None;
-
-    let last_output_suffix = if last_output_trim.is_empty() {
-        String::new()
-    } else {
-        format!("\n\nLast llama-server output:\n{}", last_output_trim)
-    };
-    let err_msg = format!(
-        "llama-server did not become ready within {} seconds. port={} model_path={} launch_args=[{}]{}",
-        timeout_secs,
-        port,
-        gguf_path,
-        args_debug,
-        last_output_suffix
-    );
-    Err(err_msg)
+    Err("Model still loading; try smaller model or increase timeout.".to_string())
 }
 
 #[tauri::command]
@@ -373,31 +211,21 @@ pub async fn runtime_status(
     state: tauri::State<'_, Mutex<RuntimeState>>,
 ) -> Result<RuntimeStatusResult, String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
-    let (running, pid): (bool, Option<u32>) = if let Some(child) = s.child.as_mut() {
-        let pid_u32 = child.id();
+    let running = if let Some(child) = s.child.as_mut() {
         match child.try_wait() {
             Ok(Some(_)) => {
                 s.child = None;
                 s.port = None;
-                (false, None)
+                false
             }
-            Ok(None) => (true, Some(pid_u32)),
-            Err(_) => (false, None),
+            Ok(None) => true,
+            Err(_) => false,
         }
     } else {
-        (false, None)
+        false
     };
     let port = if running { s.port } else { None };
-    Ok(RuntimeStatusResult {
-        running,
-        port,
-        pid: if running { pid } else { None },
-    })
-}
-
-#[tauri::command]
-pub fn get_runtime_log(log_state: tauri::State<'_, RuntimeLogState>) -> Vec<String> {
-    log_state.lines()
+    Ok(RuntimeStatusResult { running, port })
 }
 
 #[tauri::command]
@@ -425,60 +253,6 @@ struct CompletionRequest {
 #[derive(serde::Deserialize)]
 struct CompletionResponse {
     content: Option<String>,
-}
-
-/// SSE chunk when stream: true (llama-server sends data: {...} lines).
-#[derive(serde::Deserialize)]
-#[allow(dead_code)]
-struct CompletionChunk {
-    content: Option<String>,
-    #[serde(default)]
-    stop: bool,
-}
-
-#[derive(Clone, Serialize)]
-struct StreamTokenPayload {
-    run_id: Option<String>,
-    content: String,
-}
-
-/// Process SSE buffer: split on \n, handle lines starting with "data: ", emit tokens and append to full_text.
-fn process_sse_buf(
-    buf: &mut Vec<u8>,
-    app: &tauri::AppHandle,
-    run_id: Option<&String>,
-    full_text: &mut String,
-) {
-    let mut keep = 0;
-    let mut i = 0;
-    while i < buf.len() {
-        if buf[i] == b'\n' || (buf[i] == b'\r' && i + 1 < buf.len() && buf[i + 1] == b'\n') {
-            let line_end = if buf[i] == b'\r' { i + 2 } else { i + 1 };
-            let line = std::str::from_utf8(&buf[keep..i]).unwrap_or("");
-            let line = line.trim();
-            if line.starts_with("data: ") {
-                let rest = line["data: ".len()..].trim();
-                if rest == "[DONE]" || rest.is_empty() {
-                    // skip
-                } else if let Ok(chunk) = serde_json::from_str::<CompletionChunk>(rest) {
-                    if let Some(ref c) = chunk.content {
-                        full_text.push_str(c);
-                        let _ = app.emit("llama-stream-token", StreamTokenPayload {
-                            run_id: run_id.cloned(),
-                            content: c.clone(),
-                        });
-                    }
-                }
-            }
-            keep = line_end;
-            i = line_end;
-        } else {
-            i += 1;
-        }
-    }
-    if keep > 0 {
-        buf.drain(..keep);
-    }
 }
 
 /// OpenAI-style chat message.
@@ -521,25 +295,13 @@ pub struct ChatOptions {
     pub temperature: f64,
 }
 
-/// Cancel an in-flight run (e.g. after timeout or user Stop). No-op if run_id not registered.
-#[tauri::command]
-pub fn runtime_cancel_run(run_id: String, cancel_state: tauri::State<'_, CancelRunState>) {
-    if let Some(tx) = cancel_state.0.lock().unwrap().remove(&run_id) {
-        let _ = tx.send(());
-    }
-}
-
-/// Try /v1/chat/completions first (non-stream); on failure try /completion. When stream is true, use /completion with SSE.
-/// If run_id is Some, the request can be aborted via runtime_cancel_run(run_id).
+/// Try /v1/chat/completions first; on failure try /completion. Returns assistant content or error.
 #[tauri::command]
 pub async fn runtime_chat(
-    app: tauri::AppHandle,
     system_prompt: String,
     user_prompt: String,
     options: Option<ChatOptions>,
-    run_id: Option<String>,
     state: tauri::State<'_, Mutex<RuntimeState>>,
-    cancel_state: tauri::State<'_, CancelRunState>,
 ) -> Result<String, String> {
     let port = {
         let s = state.lock().map_err(|e| e.to_string())?;
@@ -549,7 +311,7 @@ pub async fn runtime_chat(
     };
 
     let opt = options.unwrap_or_default();
-    let max_tokens = if opt.max_tokens > 0 { opt.max_tokens } else { 128 };
+    let max_tokens = if opt.max_tokens > 0 { opt.max_tokens } else { 512 };
     let temperature = if opt.temperature >= 0.0 && opt.temperature <= 2.0 {
         opt.temperature
     } else {
@@ -558,137 +320,70 @@ pub async fn runtime_chat(
 
     let combined = format!("{}\n\n{}", system_prompt.trim(), user_prompt.trim());
 
-    let url_completion = format!("http://127.0.0.1:{}/completion", port);
-    let body_completion_stream = CompletionRequest {
-        prompt: combined.clone(),
-        n_predict: max_tokens,
+    let url_completions = format!("http://127.0.0.1:{}/v1/chat/completions", port);
+    let body_completions = ChatCompletionsRequest {
+        model: "llama".to_string(),
+        messages: vec![
+            ChatMessage { role: "system".to_string(), content: system_prompt },
+            ChatMessage { role: "user".to_string(), content: user_prompt },
+        ],
+        max_tokens,
         temperature,
-        top_p: 0.9,
-        stream: true,
+        stream: false,
     };
 
-    let do_request_non_stream = async {
-        let client = reqwest::Client::new();
-        let url_completions = format!("http://127.0.0.1:{}/v1/chat/completions", port);
-        let body_completions = ChatCompletionsRequest {
-            model: "llama".to_string(),
-            messages: vec![
-                ChatMessage { role: "system".to_string(), content: system_prompt },
-                ChatMessage { role: "user".to_string(), content: user_prompt },
-            ],
-            max_tokens,
-            temperature,
-            stream: false,
-        };
-
-        if let Ok(resp) = client.post(&url_completions).json(&body_completions).send().await {
-            if resp.status().is_success() {
-                if let Ok(json) = resp.json::<ChatCompletionsResponse>().await {
-                    if let Some(choices) = json.choices {
-                        if let Some(first) = choices.into_iter().next() {
-                            if let Some(msg) = first.message {
-                                if let Some(c) = msg.content {
-                                    return Ok(c.trim().to_string());
-                                }
+    let client = reqwest::Client::new();
+    if let Ok(resp) = client.post(&url_completions).json(&body_completions).send().await {
+        if resp.status().is_success() {
+            if let Ok(json) = resp.json::<ChatCompletionsResponse>().await {
+                if let Some(choices) = json.choices {
+                    if let Some(first) = choices.into_iter().next() {
+                        if let Some(msg) = first.message {
+                            if let Some(c) = msg.content {
+                                return Ok(c.trim().to_string());
                             }
                         }
                     }
                 }
             }
         }
+    }
 
-        let body_completion = CompletionRequest {
-            prompt: combined,
-            n_predict: max_tokens,
-            temperature,
-            top_p: 0.9,
-            stream: false,
-        };
-        let resp = client
-            .post(&url_completion)
-            .json(&body_completion)
-            .send()
-            .await
-            .map_err(|e| format!("Request failed: {}\nEndpoint: {} (no response)", e, url_completion))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!(
-                "llama-server error {}: {}\nEndpoint: {} HTTP {}",
-                status, text, url_completion, status
-            ));
-        }
-
-        let json: CompletionResponse = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
-        Ok(json.content.unwrap_or_default().trim().to_string())
+    let url_completion = format!("http://127.0.0.1:{}/completion", port);
+    let body_completion = CompletionRequest {
+        prompt: combined,
+        n_predict: max_tokens,
+        temperature,
+        top_p: 0.9,
+        stream: false,
     };
 
-    let client = reqwest::Client::new();
-    let resp = match client
+    let resp = client
         .post(&url_completion)
-        .json(&body_completion_stream)
+        .json(&body_completion)
         .send()
         .await
-    {
-        Err(_) => return do_request_non_stream.await,
-        Ok(r) if !r.status().is_success() => return do_request_non_stream.await,
-        Ok(r) => r,
-    };
+        .map_err(|e| format!("Request failed: {}\nEndpoint: {} (no response)", e, url_completion))?;
 
-    let (tx, mut rx) = oneshot::channel::<()>();
-    if let Some(ref rid) = run_id {
-        cancel_state.0.lock().unwrap().insert(rid.clone(), tx);
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "llama-server error {}: {}\nEndpoint: {} HTTP {}",
+            status, text, url_completion, status
+        ));
     }
 
-    let mut stream = resp.bytes_stream();
-    let mut buf: Vec<u8> = Vec::new();
-    let mut full_text = String::new();
-    let run_id_ref = run_id.as_ref();
-
-    loop {
-        tokio::select! {
-            chunk = stream.next() => {
-                match chunk {
-                    Some(Ok(bytes)) => {
-                        buf.extend_from_slice(&bytes);
-                        process_sse_buf(&mut buf, &app, run_id_ref, &mut full_text);
-                    }
-                    Some(Err(_)) => {
-                        if run_id.is_some() {
-                            cancel_state.0.lock().unwrap().remove(run_id.as_ref().unwrap());
-                        }
-                        return do_request_non_stream.await;
-                    }
-                    None => break,
-                }
-            }
-            _ = &mut rx => {
-                if let Some(ref rid) = run_id {
-                    cancel_state.0.lock().unwrap().remove(rid);
-                }
-                return Err("Run cancelled or timed out.".to_string());
-            }
-        }
-    }
-
-    if let Some(ref rid) = run_id {
-        cancel_state.0.lock().unwrap().remove(rid);
-    }
-    Ok(full_text.trim().to_string())
+    let json: CompletionResponse = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
+    Ok(json.content.unwrap_or_default().trim().to_string())
 }
 
-/// Generate completion. If run_id is Some, the request can be aborted via runtime_cancel_run(run_id).
-/// When stream is true, emits "llama-stream-token" events and returns full text when done.
 #[tauri::command]
 pub async fn runtime_generate(
-    app: tauri::AppHandle,
     prompt: String,
     stream: bool,
     options: Option<GenerateOptions>,
-    run_id: Option<String>,
     state: tauri::State<'_, Mutex<RuntimeState>>,
-    cancel_state: tauri::State<'_, CancelRunState>,
 ) -> Result<String, String> {
     let port = {
         let s = state.lock().map_err(|e| e.to_string())?;
@@ -710,101 +405,27 @@ pub async fn runtime_generate(
 
     let url = format!("http://127.0.0.1:{}/completion", port);
     let body = CompletionRequest {
-        prompt: prompt.clone(),
+        prompt,
         n_predict: max_tokens,
         temperature,
         top_p,
         stream,
     };
 
-    if stream {
-        let client = reqwest::Client::new();
-        let resp = match client.post(&url).json(&body).send().await {
-            Err(e) => return Err(format!("Request failed: {}", e)),
-            Ok(r) if !r.status().is_success() => {
-                let status = r.status();
-                let text = r.text().await.unwrap_or_default();
-                return Err(format!("Server error {}: {}", status, text));
-            }
-            Ok(r) => r,
-        };
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {}", e))?;
 
-        let mut stream = resp.bytes_stream();
-        let mut buf: Vec<u8> = Vec::new();
-        let mut full_text = String::new();
-
-        let (tx, mut rx) = oneshot::channel::<()>();
-        if let Some(ref rid) = run_id {
-            cancel_state.0.lock().unwrap().insert(rid.clone(), tx);
-        }
-
-        let run_id_ref = run_id.as_ref();
-        loop {
-            tokio::select! {
-                chunk = stream.next() => {
-                    match chunk {
-                        Some(Ok(bytes)) => {
-                            buf.extend_from_slice(&bytes);
-                            process_sse_buf(&mut buf, &app, run_id_ref, &mut full_text);
-                        }
-                        Some(Err(e)) => {
-                            if run_id.is_some() {
-                                cancel_state.0.lock().unwrap().remove(run_id.as_ref().unwrap());
-                            }
-                            return Err(format!("Stream error: {}", e));
-                        }
-                        None => break,
-                    }
-                }
-                _ = &mut rx => {
-                    if let Some(ref rid) = run_id {
-                        cancel_state.0.lock().unwrap().remove(rid);
-                    }
-                    return Err("Run cancelled or timed out.".to_string());
-                }
-            }
-        }
-
-        if let Some(ref rid) = run_id {
-            cancel_state.0.lock().unwrap().remove(rid);
-        }
-        Ok(full_text)
-    } else {
-        let do_request = async {
-            let client = reqwest::Client::new();
-            let resp = client
-                .post(&url)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| format!("Request failed: {}", e))?;
-
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let text = resp.text().await.unwrap_or_default();
-                return Err(format!("Server error {}: {}", status, text));
-            }
-
-            let json: CompletionResponse = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
-            Ok(json.content.unwrap_or_default())
-        };
-
-        if let Some(rid) = run_id {
-            let (tx, rx) = oneshot::channel();
-            cancel_state.0.lock().unwrap().insert(rid.clone(), tx);
-            let result = tokio::select! {
-                r = do_request => {
-                    cancel_state.0.lock().unwrap().remove(&rid);
-                    r
-                }
-                _ = rx => {
-                    cancel_state.0.lock().unwrap().remove(&rid);
-                    Err("Run cancelled or timed out.".to_string())
-                }
-            };
-            result
-        } else {
-            do_request.await
-        }
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Server error {}: {}", status, text));
     }
+
+    let json: CompletionResponse = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
+    Ok(json.content.unwrap_or_default())
 }

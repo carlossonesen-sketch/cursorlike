@@ -33,24 +33,10 @@ If multiple `.gguf` files exist, the app picks the **most recently modified** on
 
 From repo root, `launcher/Start-Assistant.cmd` (or `.ps1`) launches the built Tauri binary, prepends `tools/` to PATH, and logs to `Start-Assistant.log`. Build the app first.
 
-## UI (single-flow, three panes)
+## UI (single-flow, no tabs)
 
-- **Left pane (Chat)**: Conversation stream (user + assistant messages). Inline proposal cards with **Keep (Apply)**, **Revert**, **Save / Run later**, **View Diff**. Input + “Propose Patch” at bottom. Status line (“Scanning…”, “Generating patch…”, etc.) above input when busy.
-- **Middle pane**: File tree, **Select files** / **Run checks**, selected context summary. File viewer, or diff panel when **View Diff** is active (summary + full unified diff).
-- **Right pane (Live)**: Real-time progress and logs. Collapsible; open/closed state is saved per workspace in `.devassistant/settings.json` (`livePaneOpen`).
-
-### How to read the Live pane
-
-The **Live** pane shows safe, high-level progress—no private chain-of-thought, only steps and tool output.
-
-- **Header**: Spinner and current step label (e.g. "Searching repo…", "Generating edit proposal…") while a run is active.
-- **Steps**: Timeline of phases—Intent → Target files → Search → Plan → Diff → Validate → Apply → Verify → Ready. Completed steps show a check and timestamp; the current step is highlighted.
-- **Log**: Scrollable, timestamped stream of events: routing decision and confidence, files considered and why chosen, retries (e.g. "Diff invalid → retry #1"), and readiness polling for llama-server (port, URL, status) when using the local provider.
-- **Actions**:
-  - **Stop**: Cancels the current run. Checks happen at async boundaries (e.g. after repo search, before model call); no partial file writes. If apply has already started, the current file write completes atomically before the run halts.
-  - **Retry**: Shown when the last run failed; re-run the last action if your workflow supports it.
-  - **Clear logs**: Clears the in-memory event history (current session only).
-- **Possibly stuck**: If no progress event is received for 15 seconds while a run is active, a banner appears and **Stop** is emphasized so you can cancel safely.
+- **Left pane**: Conversation stream (user + assistant messages). Inline proposal cards with **Keep (Apply)**, **Revert**, **Save / Run later**, **View Diff**. Input + “Propose Patch” at bottom. Status line (“Scanning…”, “Generating patch…”, etc.) above input when busy.
+- **Right pane**: File tree, **Select files** / **Run checks**, selected context summary. File viewer, or diff panel when **View Diff** is active (summary + full unified diff).
 
 ## State machine
 
@@ -58,20 +44,10 @@ The **Live** pane shows safe, high-level progress—no private chain-of-thought,
 - **patchProposed**: Proposal shown; user can Keep, Revert (discard), Save later, or View Diff.
 - **patchApplied**: Patch applied; user can Revert (restore pre-apply snapshots).
 
-## Plan-based diffs
-
-For **EDIT** requests the app uses a **plan-based patch pipeline** to avoid long model runs:
-
-1. **Plan**: The model produces a short text plan (what to change).
-2. **Edit plan**: The model produces a compact JSON edit plan (`targetFiles` + per-file `operations`: `replace_range`, `insert_after`, `append`, `prepend` with anchors or line numbers).
-3. **Apply + diff locally**: The app applies those operations in memory and generates the unified diff with a real diff library. No model call for the diff itself.
-
-If the edit plan is invalid or apply fails, the app falls back to the older flow (model generates the unified diff), capped at 120s and 300 lines. Stop cancels the plan request immediately.
-
 ## Core modules
 
-- `src/core/`: WorkspaceService, ProjectInspector, ContextBuilder, ModelGateway (mock), PatchEngine, MemoryStore, progress (event bus for Live pane)
-- `src/components/`: TopBar, ConversationPane, FilesPane, LivePane, ProposalCard
+- `src/core/`: WorkspaceService, ProjectInspector, ContextBuilder, ModelGateway (mock), PatchEngine, MemoryStore
+- `src/components/`: TopBar, ConversationPane, FilesPane, ProposalCard
 
 ## Snapshot smoke test
 

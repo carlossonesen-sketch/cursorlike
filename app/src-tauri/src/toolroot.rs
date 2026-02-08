@@ -1,8 +1,23 @@
 //! Tool-root discovery: walk up from workspace to find runtime/llama + models/.
+//! Model registry: discover GGUF from allowed dirs only (no full C:\ scan).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const MAX_LEVELS: u32 = 8;
+
+/// Path segments that disqualify a path from model scan (ignore _archive, target, etc.).
+const IGNORE_PATH_SEGMENTS: &[&str] = &["_archive", "target", "build", "intermediates", "node_modules"];
+
+fn path_should_ignore(p: &Path) -> bool {
+    p.components().any(|c| {
+        if let std::path::Component::Normal(s) = c {
+            let seg = s.to_string_lossy().to_lowercase();
+            IGNORE_PATH_SEGMENTS.iter().any(|ign| seg.contains(ign))
+        } else {
+            false
+        }
+    })
+}
 
 #[cfg(windows)]
 const LLAMA_EXE: &str = "runtime/llama/llama-server.exe";
@@ -127,4 +142,117 @@ pub fn scan_models_for_gguf_by_mtime(tool_root: String) -> Result<Option<ScanMod
         path: ggufs[0].0.clone(),
         had_multiple,
     }))
+}
+
+/// Return the global models directory: %LOCALAPPDATA%\DevAssistantCursorLite\tools\models (Windows)
+/// or $HOME/.local/share/DevAssistantCursorLite/tools/models (Unix). Does not create it.
+#[tauri::command]
+pub fn get_global_models_dir() -> Result<String, String> {
+    #[cfg(windows)]
+    {
+        let local = std::env::var("LOCALAPPDATA").map_err(|_| "LOCALAPPDATA not set".to_string())?;
+        let p = PathBuf::from(local)
+            .join("DevAssistantCursorLite")
+            .join("tools")
+            .join(MODELS_DIR);
+        Ok(p.to_string_lossy().replace('\\', "/"))
+    }
+    #[cfg(not(windows))]
+    {
+        let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+        let p = PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("DevAssistantCursorLite")
+            .join("tools")
+            .join(MODELS_DIR);
+        Ok(p.to_string_lossy().replace('\\', "/"))
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct DiscoveredModelEntry {
+    /// Display/relative path (e.g. models/foo.gguf or .cursorlite/models/foo.gguf).
+    pub display_path: String,
+    /// Absolute path for loading.
+    pub absolute_path: String,
+    /// Source: "global" | "workspace" | "env".
+    pub source: String,
+}
+
+/// Discover all .gguf in allowed dirs only: (a) global tools/models, (b) workspace/.cursorlite/models, (c) DEVASSISTANT_MODELS_DIRS.
+/// Skips paths containing _archive, target, build, intermediates, node_modules.
+#[tauri::command]
+pub fn discover_gguf_models(workspace_root: String) -> Result<Vec<DiscoveredModelEntry>, String> {
+    let mut out: Vec<DiscoveredModelEntry> = Vec::new();
+    let workspace = Path::new(&workspace_root);
+
+    // (a) Global models dir
+    if let Ok(global_dir) = get_global_models_dir() {
+        let global_path = PathBuf::from(&global_dir);
+        if global_path.is_dir() && !path_should_ignore(&global_path) {
+            collect_gguf_one_level(&global_path, &global_path, "global", &mut out);
+        }
+    }
+
+    // (b) Workspace .cursorlite/models
+    let cursorlite = workspace.join(".cursorlite").join(MODELS_DIR);
+    if cursorlite.is_dir() && !path_should_ignore(&cursorlite) {
+        let canon = cursorlite.canonicalize().unwrap_or(cursorlite);
+        collect_gguf_one_level(&canon, &canon, "workspace", &mut out);
+    }
+
+    // (c) Env DEVASSISTANT_MODELS_DIRS (semicolon-separated)
+    if let Ok(dirs) = std::env::var("DEVASSISTANT_MODELS_DIRS") {
+        for d in dirs.split(';') {
+            let d = d.trim();
+            if d.is_empty() {
+                continue;
+            }
+            let p = PathBuf::from(d);
+            if let Ok(canon) = p.canonicalize() {
+                if canon.is_dir() && !path_should_ignore(&canon) {
+                    collect_gguf_one_level(&canon, &canon, "env", &mut out);
+                }
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+fn collect_gguf_one_level(
+    dir: &Path,
+    _base: &Path,
+    source: &str,
+    out: &mut Vec<DiscoveredModelEntry>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if e.file_type().map(|t| t.is_dir()).unwrap_or(true) {
+            continue;
+        }
+        if !name.to_lowercase().ends_with(GGUF_EXT) {
+            continue;
+        }
+        let full = dir.join(&name);
+        if path_should_ignore(&full) {
+            continue;
+        }
+        let display = if source == "global" {
+            format!("{}/{}", MODELS_DIR, name)
+        } else if source == "workspace" {
+            format!(".cursorlite/{}/{}", MODELS_DIR, name)
+        } else {
+            full.to_string_lossy().replace('\\', "/")
+        };
+        out.push(DiscoveredModelEntry {
+            display_path: display,
+            absolute_path: full.to_string_lossy().replace('\\', "/"),
+            source: source.to_string(),
+        });
+    }
 }

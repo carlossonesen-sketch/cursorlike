@@ -10,7 +10,6 @@ const SETTINGS_PATH = ".devassistant/settings.json";
 const DEFAULT_SETTINGS: WorkspaceSettings = {
   autoPacksEnabled: true,
   enabledPacks: [],
-  devMode: "fast",
 };
 
 export async function readWorkspaceSettings(
@@ -22,13 +21,19 @@ export async function readWorkspaceSettings(
       path: SETTINGS_PATH,
     });
     const data = JSON.parse(raw) as Partial<WorkspaceSettings>;
+    const modelRoles = data.modelRoles && typeof data.modelRoles === "object" ? {
+      coder: typeof data.modelRoles.coder === "string" ? data.modelRoles.coder.trim() || undefined : undefined,
+      general: typeof data.modelRoles.general === "string" ? data.modelRoles.general.trim() || undefined : undefined,
+      reviewer: typeof data.modelRoles.reviewer === "string" ? data.modelRoles.reviewer.trim() || undefined : undefined,
+      embeddings: typeof data.modelRoles.embeddings === "string" ? data.modelRoles.embeddings.trim() || undefined : undefined,
+      reranker: typeof data.modelRoles.reranker === "string" ? data.modelRoles.reranker.trim() || undefined : undefined,
+    } : undefined;
     return {
       autoPacksEnabled: data.autoPacksEnabled ?? DEFAULT_SETTINGS.autoPacksEnabled,
       enabledPacks: Array.isArray(data.enabledPacks) ? data.enabledPacks : DEFAULT_SETTINGS.enabledPacks,
-      devMode: data.devMode === "safe" || data.devMode === "fast" ? data.devMode : "fast",
       modelPath: typeof data.modelPath === "string" && data.modelPath.trim() ? data.modelPath.trim() : undefined,
       port: typeof data.port === "number" && data.port > 0 ? data.port : undefined,
-      livePaneOpen: typeof data.livePaneOpen === "boolean" ? data.livePaneOpen : undefined,
+      modelRoles,
     };
   } catch {
     return { ...DEFAULT_SETTINGS };

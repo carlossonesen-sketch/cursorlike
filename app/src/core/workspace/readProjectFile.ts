@@ -48,20 +48,10 @@ const FILE_VERBS = new Set<string>([
 const ALLOWED_BARE_FILENAMES = new Set<string>([
   "readme", "readme.md", "license", "license.md", "package.json", "tsconfig.json", "cargo.toml",
   "changelog", "changelog.md", "contributing", "contributing.md", "makefile", "dockerfile",
-  "env", ".env", ".env.example", "package json", "main script",
 ]);
 
-/** Plain-English aliases -> canonical hint for resolution (readProjectFile will try candidates). */
-export const FILE_ALIASES: Record<string, string[]> = {
-  readme: ["README.md", "readme.md", "README", "readme"],
-  license: ["LICENSE", "LICENSE.md", "license", "license.md"],
-  env: [".env.example", ".env", "env"],
-  "package json": ["package.json"],
-  "main script": ["src/index.ts", "index.ts", "src/main.ts", "main.ts", "src/index.js", "index.js", "src/main.js", "main.js"],
-};
-
 /** Canonical file names that should be detected even without extension. */
-const BARE_FILE_PATTERN = /\b(readme|license|changelog|contributing|makefile|dockerfile|package\.json|tsconfig\.json|cargo\.toml|env)\b/i;
+const BARE_FILE_PATTERN = /\b(readme|license|changelog|contributing|makefile|dockerfile|package\.json|tsconfig\.json|cargo\.toml)\b/i;
 
 const HAS_EXTENSION = /\.([a-z0-9]{1,6})$/i;
 
@@ -96,63 +86,40 @@ export function extractFileMentions(prompt: string): string[] {
   const hints = new Set<string>();
 
   const add = (raw: string) => {
-    let n = normPath(raw);
-    if (!n) return;
-    const lower = n.toLowerCase().replace(/\s+/g, " ");
-    if (lower === "package json") n = "package.json";
-    if (isValidFileCandidate(n)) hints.add(n);
+    const n = normPath(raw);
+    if (n && isValidFileCandidate(n)) hints.add(n);
   };
 
   const lower = t.toLowerCase();
 
-  // PRIORITY 1: "Open the file: X" / "open the file: X" (deterministic OPEN)
-  const openTheFileMatch = t.match(/\bopen\s+the\s+file\s*:\s*([^\s,]+)/i);
-  if (openTheFileMatch?.[1]) add(openTheFileMatch[1].trim());
-
-  // "open the main script" -> best match (e.g. src/index.ts)
-  if (/\bopen\s+(?:the\s+)?main\s+script\b/i.test(t)) add("main script");
-
-  // PRIORITY 2: "Edit X: ..." / "Edit README.md: add section" (path before colon)
-  const editPathColonMatch = t.match(/\bedit\s+([^\s:]+(?:\.[a-z0-9]{1,6})?)\s*:\s*/i);
-  if (editPathColonMatch?.[1]) add(editPathColonMatch[1].trim());
-
-  // PRIORITY 3: "to the readme", "add X to the readme", "in the readme" (plain-English EDIT)
-  const toTheFileRe = /(?:to|in)\s+(?:the\s+)?(readme|license|changelog|contributing|package\s*json|env)\b/gi;
-  let toMatch: RegExpExecArray | null;
-  while ((toMatch = toTheFileRe.exec(t)) !== null) {
-    const name = (toMatch[1] || "").trim().toLowerCase().replace(/\s+/, " ");
-    if (name === "package json") add("package.json");
-    else if (name) add(name);
-  }
-
-  // PRIORITY 4: Detect bare file names anywhere in the message (readme, license, etc.)
+  // PRIORITY 1: Detect bare file names anywhere in the message (readme, license, etc.)
   const bareMatch = BARE_FILE_PATTERN.exec(lower);
   if (bareMatch) {
     add(bareMatch[1]);
   }
 
-  // PRIORITY 5: "Open: X" explicit syntax (no "the file")
+  // PRIORITY 2: "Open: X" explicit syntax
   if (/open\s*:\s*([^\s]+)/.test(lower)) {
     const m = t.match(/open\s*:\s*([^\s]+)/i);
     if (m?.[1]) add(m[1]);
   }
 
-  // PRIORITY 6: Backtick-quoted paths
+  // PRIORITY 3: Backtick-quoted paths
   t.replace(/`([^`]+)`/g, (_, path) => {
     add(path);
     return "";
   });
 
-  // PRIORITY 7: Paths with slashes
+  // PRIORITY 4: Paths with slashes
   const pathWithSlash = /[a-zA-Z0-9_.-]+[\/\\][a-zA-Z0-9/\\_.-]+/g;
   let pm: RegExpExecArray | null;
   while ((pm = pathWithSlash.exec(t)) !== null) if (pm[0]) add(pm[0]);
 
-  // PRIORITY 8: Tokens with file extensions
+  // PRIORITY 5: Tokens with file extensions
   const withExtension = /\b([a-zA-Z0-9_.-]+\.[a-z0-9]{1,6})\b/gi;
   while ((pm = withExtension.exec(t)) !== null) if (pm[1]) add(pm[1]);
 
-  // PRIORITY 9: Phrase patterns like "open X", "show me X", "read the readme", "in X add Y"
+  // PRIORITY 6: Phrase patterns like "open X", "show me X", "in X add Y"
   const phraseRe = /(?:show\s+me|open|read|display|what'?s?\s+in)\s+(?:the\s+)?([^\s?,]+)|in\s+([^\s]+)\s+(?:add|remove|change|fix|update)/gi;
   let phraseMatch: RegExpExecArray | null;
   while ((phraseMatch = phraseRe.exec(t)) !== null) {
@@ -160,7 +127,7 @@ export function extractFileMentions(prompt: string): string[] {
     if (captured) add(captured.trim());
   }
 
-  // PRIORITY 10: "X and add/remove/change Y" pattern - file followed by edit verb
+  // PRIORITY 7: "X and add/remove/change Y" pattern - file followed by edit verb
   const fileAndEditRe = /\b([a-zA-Z0-9_.-]+)\s+and\s+(?:add|insert|remove|delete|change|update|replace|prepend|append)\b/gi;
   while ((phraseMatch = fileAndEditRe.exec(t)) !== null) {
     const captured = phraseMatch[1];
@@ -171,16 +138,7 @@ export function extractFileMentions(prompt: string): string[] {
   if (hints.size === 0 && /^[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)*\s*$/.test(t)) add(t.trim());
   if (hints.size === 0 && ALLOWED_BARE_FILENAMES.has(lower)) add(t.trim());
 
-  let result = [...hints];
-  // Prefer path with extension when same file (e.g. keep README.md, drop readme)
-  result = result.filter((p) => {
-    if (!p.includes(".")) {
-      const stem = p.toLowerCase();
-      if (result.some((q) => q.includes(".") && q.replace(/\.[^.]+$/, "").toLowerCase() === stem))
-        return false;
-    }
-    return true;
-  });
+  const result = [...hints];
   if (result.length > 0) console.log("fileMentionsDetected:", result);
   return result;
 }
@@ -238,16 +196,12 @@ export async function readProjectFile(
   if (!normalized) return { path: hint, error: "not found" };
 
   const candidates: string[] = [];
-  const lower = normalized.toLowerCase().replace(/\s+/g, " ");
-  if (FILE_ALIASES[lower]) {
-    candidates.push(...FILE_ALIASES[lower]);
-  } else if (normalized.includes("/") || HAS_EXTENSION.test(normalized) || normalized.startsWith(".")) {
+  if (normalized.includes("/") || normalized.includes(".")) {
     candidates.push(normalized);
   } else {
+    const lower = normalized.toLowerCase();
     if (lower === "readme" || lower === "readme.md") {
       candidates.push(...README_CANDIDATES);
-    } else if (lower === "env") {
-      candidates.push(".env.example", ".env", "env");
     } else {
       candidates.push(normalized, `${normalized}.md`, `${normalized}.txt`);
     }

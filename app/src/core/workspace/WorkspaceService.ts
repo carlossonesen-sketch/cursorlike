@@ -1,5 +1,10 @@
-import { invoke } from "@tauri-apps/api/core";
+/**
+ * Workspace service: open folder (dialog), read file tree.
+ * Respects .gitignore + hard ignores. All writes go via PatchEngine.
+ */
+
 import { open } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
 import type { DirEntry, FileTreeNode } from "../types";
 
 const HARD_IGNORES = new Set([
@@ -7,18 +12,10 @@ const HARD_IGNORES = new Set([
   "target", "bin", "obj", ".devassistant",
 ]);
 const MAX_TREE_DEPTH = 20;
+
 const NO_WORKSPACE = "Open a workspace first.";
 
 export class WorkspaceService {
-  async getGlobalToolRoot(): Promise<string> {
-    return await invoke<string>("get_global_tool_root");
-  }
-
-  /** Create runtime/llama and models under global tool root. Returns the root path. */
-  async ensureGlobalToolDirs(): Promise<string> {
-    return await invoke<string>("ensure_global_tool_dirs");
-  }
-
   private _root: string | null = null;
   private _gitignorePatterns: string[] = [];
 
@@ -121,14 +118,6 @@ export class WorkspaceService {
     });
   }
 
-  /** Delete a file under workspace root. No-op if missing. Does not delete directories. */
-  async deleteFile(workspaceRoot: string, relPath: string): Promise<void> {
-    await invoke("delete_project_file", {
-      workspaceRoot,
-      relativePath: relPath,
-    });
-  }
-
   /** Resolve relative path under workspace root; returns absolute path. */
   async resolvePath(workspaceRoot: string, relPath: string): Promise<string> {
     return invoke<string>("workspace_resolve_path", {
@@ -171,36 +160,6 @@ export class WorkspaceService {
 
   normalizeRel(p: string): string {
     return p.replace(/\\/g, "/").replace(/^\/+/, "");
-  }
-
-  /** Run a system command (prereq check, install). No workspace required. */
-  async runSystemCommand(command: string): Promise<{
-    exitCode: number;
-    stdout: string;
-    stderr: string;
-  }> {
-    return invoke<{ exitCode: number; stdout: string; stderr: string }>(
-      "run_system_command",
-      { command }
-    );
-  }
-
-  /** Download a file from URL to path (must be under global tool root). No shell; avoids URL parsing issues. */
-  async downloadFileToPath(url: string, outputPath: string): Promise<{ bytesWritten: number }> {
-    return invoke<{ bytesWritten: number }>("download_file_to_path", { url, outputPath });
-  }
-
-  /** Run a command in the workspace directory. Returns exit code, stdout, stderr. */
-  async runCommand(workspaceRoot: string, command: string): Promise<{
-    exitCode: number;
-    stdout: string;
-    stderr: string;
-  }> {
-    const result = await invoke<{ exitCode: number; stdout: string; stderr: string }>(
-      "workspace_run_command",
-      { workspaceRoot, command }
-    );
-    return result;
   }
 
   /** Pick multiple files for context. Returns relative paths or []. */

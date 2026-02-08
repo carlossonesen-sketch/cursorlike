@@ -1,4 +1,4 @@
-﻿/** Shared types for DevAssistant core. */
+/** Shared types for DevAssistant core. */
 
 export interface DirEntry {
   name: string;
@@ -26,7 +26,6 @@ export interface DetectedCommands {
   test?: string;
   lint?: string;
   dev?: string;
-  typecheck?: string;
 }
 
 /** Project snapshot stored at .devassistant/project_snapshot.json */
@@ -40,21 +39,25 @@ export interface ProjectSnapshot {
   generatedAt?: string;
 }
 
-/** Dev mode: Fast = no verify after apply, Safe = verify after apply. */
-export type DevMode = "fast" | "safe";
+/** Model role paths (absolute or toolRoot-relative). Optional; fallback to modelPath for coder/general. */
+export interface ModelRolePaths {
+  coder?: string;
+  general?: string;
+  reviewer?: string;
+  embeddings?: string;
+  reranker?: string;
+}
 
 /** Workspace settings stored at .devassistant/settings.json */
 export interface WorkspaceSettings {
   autoPacksEnabled: boolean;
   enabledPacks: string[];
-  /** Fast Dev (default) or Safe Dev (verify after apply). */
-  devMode?: DevMode;
-  /** ToolRoot-relative path to GGUF (e.g. models/foo.gguf) for provider=local. */
+  /** ToolRoot-relative path to GGUF (e.g. models/foo.gguf) for provider=local. Legacy; used when modelRoles not set. */
   modelPath?: string;
-  /** Port for llama-server (default 8080, overridable by env LLAMA_PORT). */
+  /** Port for llama-server (default 11435). */
   port?: number;
-  /** Live pane open state (persisted per workspace). */
-  livePaneOpen?: boolean;
+  /** Per-role model paths (absolute or relative). When set, overrides modelPath for coder/general. */
+  modelRoles?: ModelRolePaths;
 }
 
 export interface ModelContext {
@@ -67,8 +70,6 @@ export interface ModelContext {
   targetFiles?: string[];
   /** Retrieved knowledge chunks (title + sourcePath + chunkText). */
   knowledgeChunks?: KnowledgeChunkRef[];
-  /** Optional run id for cancellation; passed to backend so runtime_cancel_run can abort in-flight request. */
-  runId?: string;
 }
 
 /** One knowledge chunk reference for context (and UI display). */
@@ -81,28 +82,6 @@ export interface KnowledgeChunkRef {
 export interface PlanAndPatch {
   explanation: string;
   patch: string;
-  /** Optional incremental edit plan used for step-by-step preview/apply. */
-  editPlan?: import("./patch/EditPlan").EditPlan;
-  /** True when diff was built from direct file edit (model did not return valid unified diff). */
-  fallbackDiff?: boolean;
-  /** True when patch was capped for display (use full patch for apply). */
-  partialDiff?: boolean;
-  /** Capped patch for display when partialDiff (max 400 lines / 25k chars). */
-  cappedPatch?: string;
-}
-
-/** Confidence of grounded summary after validation. */
-export type SummaryConfidence = "high" | "medium" | "low";
-
-/** Human-readable change summary for a proposal (single or multi). */
-export interface ChangeSummary {
-  title: string;
-  whatChanged: string[];
-  behaviorAfter: string[];
-  files: Array<{ path: string; change: string }>;
-  risks?: string[];
-  /** Set by validator: high = most bullets unchanged, medium = some rewrites, low = heavy cleanup or fallback. */
-  confidence?: SummaryConfidence;
 }
 
 /** Planner agent output. NO patch. */
@@ -178,4 +157,3 @@ export interface RetrievedChunk {
   chunkText: string;
   score: number;
 }
-

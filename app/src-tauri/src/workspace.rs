@@ -1,110 +1,9 @@
 //! Workspace-scoped filesystem operations. All paths validated against root; no writes outside.
 
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use tokio::io::AsyncWriteExt;
-
-
-fn global_tool_root_path() -> Result<PathBuf, String> {
-  let local = std::env::var("LOCALAPPDATA").map_err(|_| "LOCALAPPDATA is not set".to_string())?;
-  Ok(std::path::PathBuf::from(local).join("DevAssistantCursorLite").join("tools"))
-}
-
-#[tauri::command]
-pub fn get_global_tool_root() -> Result<String, String> {
-  let tool_root = global_tool_root_path()?;
-  Ok(tool_root.to_string_lossy().to_string())
-}
-
-/// Create runtime/llama and models under global tool root. Returns the global tool root path.
-#[tauri::command]
-pub fn ensure_global_tool_dirs() -> Result<String, String> {
-  let root = global_tool_root_path()?;
-  let runtime_llama = root.join("runtime").join("llama");
-  let models = root.join("models");
-  std::fs::create_dir_all(&runtime_llama).map_err(|e| e.to_string())?;
-  std::fs::create_dir_all(&models).map_err(|e| e.to_string())?;
-  Ok(root.to_string_lossy().to_string())
-}
-
-/// Scan %LOCALAPPDATA%\\DevAssistantCursorLite\\tools\\models for *.gguf.
-/// Prefer filename containing "q4_k_m", else largest file. Returns absolute path or None.
-#[tauri::command]
-pub fn scan_global_models_gguf() -> Result<Option<String>, String> {
-  let root = global_tool_root_path()?;
-  let models_dir = root.join("models");
-  if !models_dir.is_dir() {
-    return Ok(None);
-  }
-  let mut ggufs: Vec<(PathBuf, u64, bool)> = Vec::new();
-  for e in std::fs::read_dir(&models_dir).map_err(|e| e.to_string())? {
-    let e = e.map_err(|e| e.to_string())?;
-    let name = e.file_name().to_string_lossy().into_owned();
-    if e.file_type().map(|t| t.is_dir()).unwrap_or(true) {
-      continue;
-    }
-    if !name.to_lowercase().ends_with(".gguf") {
-      continue;
-    }
-    let full = models_dir.join(&name);
-    let size = std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
-    let prefer_q4km = name.to_lowercase().contains("q4_k_m");
-    ggufs.push((full, size, prefer_q4km));
-  }
-  if ggufs.is_empty() {
-    return Ok(None);
-  }
-  if ggufs.len() == 1 {
-    return Ok(Some(ggufs[0].0.to_string_lossy().to_string()));
-  }
-  ggufs.sort_by(|a, b| {
-    if a.2 != b.2 {
-      return if a.2 { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater };
-    }
-    b.1.cmp(&a.1)
-  });
-  Ok(Some(ggufs[0].0.to_string_lossy().to_string()))
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DownloadFileResult {
-  pub bytes_written: u64,
-}
-
-/// Download a file from URL to the given path. Path must be under the global tool root.
-/// Uses reqwest (no shell), so URLs are not mangled by cmd.
-#[tauri::command]
-pub async fn download_file_to_path(url: String, output_path: String) -> Result<DownloadFileResult, String> {
-  let allowed_root = global_tool_root_path()?.canonicalize().map_err(|e| e.to_string())?;
-  let path = PathBuf::from(&output_path);
-  if let Some(parent) = path.parent() {
-    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    let parent_canon = parent.canonicalize().map_err(|e| e.to_string())?;
-    if !parent_canon.starts_with(&allowed_root) {
-      return Err("output path must be under the app tools directory".to_string());
-    }
-  } else {
-    return Err("invalid output path".to_string());
-  }
-
-  let mut response = reqwest::get(&url).await.map_err(|e| e.to_string())?;
-  response.error_for_status_ref().map_err(|e| e.to_string())?;
-
-  let mut file = tokio::fs::File::create(&path).await.map_err(|e| e.to_string())?;
-  let mut total: u64 = 0;
-  while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
-    let n = chunk.len();
-    file.write_all(&chunk).await.map_err(|e| e.to_string())?;
-    total += n as u64;
-  }
-  file.flush().await.map_err(|e| e.to_string())?;
-
-  Ok(DownloadFileResult { bytes_written: total })
-}
 
 fn normalize_rel(s: &str) -> PathBuf {
     let p = Path::new(s);
@@ -168,6 +67,25 @@ pub struct DirEntry {
 pub fn workspace_read_file(workspace_root: String, path: String) -> Result<String, String> {
     let full = resolve(&workspace_root, &path)?;
     std::fs::read_to_string(&full).map_err(|e| e.to_string())
+}
+
+/// Read last N lines from a file under workspace root. Path is relative (e.g. ".devassistant/logs/llama-server.log").
+/// Returns empty vec if file missing or unreadable.
+#[tauri::command]
+pub fn workspace_read_file_tail(
+    workspace_root: String,
+    path: String,
+    max_lines: u32,
+) -> Result<Vec<String>, String> {
+    let full = resolve(&workspace_root, &path)?;
+    let content = match std::fs::read_to_string(&full) {
+        Ok(c) => c,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let lines: Vec<&str> = content.split('\n').collect();
+    let n = max_lines as usize;
+    let start = if lines.len() <= n { 0 } else { lines.len() - n };
+    Ok(lines[start..].iter().map(|s| (*s).to_string()).collect())
 }
 
 #[tauri::command]
@@ -471,7 +389,7 @@ pub fn workspace_walk_snapshot(
                             .and_then(|d| {
                                 Utc.timestamp_opt(d.as_secs() as i64, 0)
                                     .single()
-                                    .map(|dt| dt.to_rfc3339())
+                                    .map(|dt: DateTime<Utc>| dt.to_rfc3339())
                             })
                     })
                     .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string());
@@ -494,56 +412,5 @@ pub fn workspace_walk_snapshot(
         total_dirs,
         files,
         top_level,
-    })
-}
-
-/// Delete a file under workspace root. No-op if missing. Does not delete directories.
-#[tauri::command]
-pub fn delete_project_file(workspace_root: String, relative_path: String) -> Result<(), String> {
-    let full = resolve(&workspace_root, &relative_path)?;
-    if full.is_file() {
-        std::fs::remove_file(&full).map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RunCommandResult {
-    pub exit_code: i32,
-    pub stdout: String,
-    pub stderr: String,
-}
-
-/// Run a system command (no workspace). Used for prereq checks and install scripts.
-#[tauri::command]
-pub fn run_system_command(command: String) -> Result<RunCommandResult, String> {
-    run_command_impl(None, &command)
-}
-
-/// Run a command with cwd set to workspace root. Used for verification (typecheck, lint, etc.).
-#[tauri::command]
-pub fn workspace_run_command(workspace_root: String, command: String) -> Result<RunCommandResult, String> {
-    run_command_impl(Some(&workspace_root), &command)
-}
-
-fn run_command_impl(cwd: Option<&str>, command: &str) -> Result<RunCommandResult, String> {
-    #[cfg(windows)]
-    let (shell, shell_arg) = ("cmd", "/c");
-    #[cfg(not(windows))]
-    let (shell, shell_arg) = ("sh", "-c");
-
-    let mut cmd = Command::new(shell);
-    cmd.arg(shell_arg).arg(command);
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
-    }
-    let output = cmd.output().map_err(|e| e.to_string())?;
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    Ok(RunCommandResult {
-        exit_code: output.status.code().unwrap_or(-1),
-        stdout,
-        stderr,
     })
 }

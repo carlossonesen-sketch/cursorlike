@@ -2,8 +2,7 @@ import { useState, useCallback, useEffect } from "react";
 import { diffLines } from "diff";
 import type { FileTreeNode } from "../core/types";
 import type { SessionRecord } from "../core/types";
-import type { FileEditState, PendingEdit } from "../App";
-import type { MultiFileProposal } from "../core";
+import type { FileEditState } from "../App";
 import { SessionsPanel } from "./SessionsPanel";
 
 interface FilesPaneProps {
@@ -30,15 +29,6 @@ interface FilesPaneProps {
   onFileEditSave: () => void;
   onSetBaseline: () => void;
   onResetToBaseline: () => void;
-  pendingEdit: PendingEdit | null;
-  onSelectPendingFile: (index: number) => void;
-  multiFileProposal: MultiFileProposal | null;
-  includedFilePaths: Record<string, boolean>;
-  onToggleIncludedFile: (path: string) => void;
-  selectedMultiFileIndex: number;
-  onSelectMultiFileIndex: (index: number) => void;
-  onApplyMultiFileSelected: () => void;
-  onCancelMultiFileProposal: () => void;
 }
 
 export function FilesPane({
@@ -64,15 +54,6 @@ export function FilesPane({
   onFileEditSave,
   onSetBaseline,
   onResetToBaseline,
-  pendingEdit,
-  onSelectPendingFile,
-  multiFileProposal,
-  includedFilePaths,
-  onToggleIncludedFile,
-  selectedMultiFileIndex,
-  onSelectMultiFileIndex,
-  onApplyMultiFileSelected,
-  onCancelMultiFileProposal,
 }: FilesPaneProps) {
   const [viewerPath, setViewerPath] = useState<string | null>(null);
   const [viewerContent, setViewerContent] = useState<string>("");
@@ -146,7 +127,7 @@ export function FilesPane({
   const current = selectedDiffPath ?? (changedFiles[0] ?? null);
   const preview = current && previewMap?.get(current);
 
-  const diffPanelVisible = Boolean(showDiffPanel && (fileEditState || pendingEdit || multiFileProposal));
+  const diffPanelVisible = Boolean(showDiffPanel && fileEditState);
   useEffect(() => {
     console.log("DIFF_PANEL_VISIBLE", diffPanelVisible);
   }, [diffPanelVisible]);
@@ -186,204 +167,7 @@ export function FilesPane({
         />
       </div>
       <div className="viewer-section">
-        {showDiffPanel && multiFileProposal && (
-          <div className="diff-panel multi-file-proposal-panel">
-            <div className="file-edit-header">
-              <h4>Multi-file proposal</h4>
-              <span className="muted">{multiFileProposal.files.filter((f) => includedFilePaths[f.path] !== false).length} files selected</span>
-            </div>
-            {multiFileProposal.summary ? (
-              <div className="change-summary change-summary-panel">
-                <span className="change-summary-badge">
-                  Summary (grounded){multiFileProposal.summary.confidence ? ` — Confidence: ${multiFileProposal.summary.confidence.charAt(0).toUpperCase() + multiFileProposal.summary.confidence.slice(1)}` : " in proposed changes"}
-                </span>
-                <strong className="change-summary-title">{multiFileProposal.summary.title}</strong>
-                <div className="change-summary-section">
-                  <span className="change-summary-label">What changed:</span>
-                  <ul>{multiFileProposal.summary.whatChanged.map((b, i) => <li key={i}>{b}</li>)}</ul>
-                </div>
-                <div className="change-summary-section">
-                  <span className="change-summary-label">Behavior after:</span>
-                  <ul>{multiFileProposal.summary.behaviorAfter.map((b, i) => <li key={i}>{b}</li>)}</ul>
-                </div>
-                <div className="change-summary-files">
-                  {multiFileProposal.summary.files.map((f, i) => (
-                    <div key={i} className="change-summary-file"><code>{f.path}</code>: {f.change}</div>
-                  ))}
-                </div>
-                {multiFileProposal.summary.risks?.length ? (
-                  <div className="change-summary-section">
-                    <span className="change-summary-label">Risks:</span>
-                    <ul>{multiFileProposal.summary.risks.map((b, i) => <li key={i}>{b}</li>)}</ul>
-                  </div>
-                ) : null}
-              </div>
-            ) : multiFileProposal.plan.length > 0 ? (
-              <div className="multi-file-plan">
-                <strong>Plan:</strong>
-                <ul>
-                  {multiFileProposal.plan.map((bullet, i) => (
-                    <li key={i}>{bullet}</li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-            <div className="multi-file-layout">
-              <div className="multi-file-sidebar">
-                {multiFileProposal.files.map((f, i) => (
-                  <label key={f.path} className={`multi-file-item ${selectedMultiFileIndex === i ? "active" : ""}`}>
-                    <input
-                      type="checkbox"
-                      checked={includedFilePaths[f.path] !== false}
-                      onChange={() => onToggleIncludedFile(f.path)}
-                    />
-                    <span
-                      className="multi-file-name"
-                      onClick={() => onSelectMultiFileIndex(i)}
-                      role="button"
-                      tabIndex={0}
-                      onKeyDown={(e) => e.key === "Enter" && onSelectMultiFileIndex(i)}
-                    >
-                      {f.path.split(/[/\\]/).pop() ?? f.path}
-                    </span>
-                    <span className={`multi-file-badge ${f.exists ? "modified" : "new"}`}>
-                      {f.exists ? "Modified" : "New"}
-                    </span>
-                  </label>
-                ))}
-              </div>
-              <div className="multi-file-main">
-                {(() => {
-                  const sel = multiFileProposal.files[selectedMultiFileIndex];
-                  if (!sel) return <p className="muted">Select a file.</p>;
-                  return (
-                    <>
-                      <div className="multi-file-path">{sel.path}</div>
-                      <div className="multi-file-summary">{sel.summary}</div>
-                      <div className="multi-file-actions">
-                        <button
-                          type="button"
-                          className="btn btn-sm"
-                          onClick={() => navigator.clipboard.writeText(sel.proposedContent)}
-                        >
-                          Copy proposed
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-sm"
-                          onClick={() => loadViewer(sel.path)}
-                        >
-                          Open in editor
-                        </button>
-                      </div>
-                      <div className="file-edit-rows">
-                        <div className="file-edit-col">
-                          <strong>Original</strong>
-                          <pre className="file-edit-original">{sel.originalContent || "(empty)"}</pre>
-                        </div>
-                        <div className="file-edit-col">
-                          <strong>Proposed</strong>
-                          <pre className="file-edit-proposed">{sel.proposedContent || "(empty)"}</pre>
-                        </div>
-                      </div>
-                    </>
-                  );
-                })()}
-              </div>
-            </div>
-            <div className="plan-actions">
-              <button
-                type="button"
-                className="btn primary"
-                onClick={onApplyMultiFileSelected}
-                disabled={multiFileProposal.files.filter((f) => includedFilePaths[f.path] !== false).length === 0}
-              >
-                Apply Selected
-              </button>
-              <button type="button" className="btn" onClick={onCancelMultiFileProposal}>
-                Cancel
-              </button>
-            </div>
-          </div>
-        )}
-        {showDiffPanel && pendingEdit && !multiFileProposal && (
-          <div className="diff-panel pending-edit-panel">
-            {pendingEdit.summary && (
-              <div className="change-summary change-summary-panel">
-                <span className="change-summary-badge">
-                  Summary (grounded){pendingEdit.summary.confidence ? ` — Confidence: ${pendingEdit.summary.confidence.charAt(0).toUpperCase() + pendingEdit.summary.confidence.slice(1)}` : " in proposed changes"}
-                </span>
-                <strong className="change-summary-title">{pendingEdit.summary.title}</strong>
-                <div className="change-summary-section">
-                  <span className="change-summary-label">What changed:</span>
-                  <ul>{pendingEdit.summary.whatChanged.map((b, i) => <li key={i}>{b}</li>)}</ul>
-                </div>
-                <div className="change-summary-section">
-                  <span className="change-summary-label">Behavior after:</span>
-                  <ul>{pendingEdit.summary.behaviorAfter.map((b, i) => <li key={i}>{b}</li>)}</ul>
-                </div>
-                <div className="change-summary-files">
-                  {pendingEdit.summary.files.map((f, i) => (
-                    <div key={i} className="change-summary-file"><code>{f.path}</code>: {f.change}</div>
-                  ))}
-                </div>
-                {pendingEdit.summary.risks?.length ? (
-                  <div className="change-summary-section">
-                    <span className="change-summary-label">Risks:</span>
-                    <ul>{pendingEdit.summary.risks.map((b, i) => <li key={i}>{b}</li>)}</ul>
-                  </div>
-                ) : null}
-              </div>
-            )}
-            <div className="file-edit-header">
-              <h4>Planned edit preview</h4>
-              <div className="pending-file-tabs">
-                {pendingEdit.files.map((f, i) => (
-                  <button
-                    key={f.path}
-                    type="button"
-                    title={f.path}
-                    className={pendingEdit.selectedIndex === i ? "active" : ""}
-                    onClick={() => onSelectPendingFile(i)}
-                  >
-                    {f.path.split(/[/\\]/).pop() ?? f.path}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div className="pending-diff-view">
-              {(() => {
-                const idx = pendingEdit.selectedIndex;
-                const sel = pendingEdit.files[idx];
-                if (!sel) return <p className="muted">No file selected.</p>;
-                const originalText = sel.original;
-                const proposedText = sel.proposed;
-                const hasChanges = originalText !== proposedText;
-                return (
-                  <div className="file-edit-rows">
-                    <div className="file-edit-col">
-                      <strong>Original</strong>
-                      <pre className="file-edit-original">
-                        {originalText || "(empty)"}
-                      </pre>
-                    </div>
-                    <div className="file-edit-col">
-                      <strong>Proposed</strong>
-                      {hasChanges ? (
-                        <pre className="file-edit-proposed">
-                          {proposedText || "(empty)"}
-                        </pre>
-                      ) : (
-                        <p className="muted">No changes proposed for this file.</p>
-                      )}
-                    </div>
-                  </div>
-                );
-              })()}
-            </div>
-          </div>
-        )}
-        {showDiffPanel && fileEditState && !pendingEdit && !multiFileProposal && (
+        {showDiffPanel && fileEditState && (
           <div className="diff-panel file-edit-panel">
             <div className="file-edit-header">
               <h4>File: {fileEditState.relativePath}</h4>
@@ -574,7 +358,7 @@ export function FilesPane({
             )}
           </div>
         )}
-        {(!showDiffPanel || (!fileEditState && !patch && !pendingEdit)) && (
+        {(!showDiffPanel || (!fileEditState && !patch)) && (
           <div className="file-viewer">
             <h4>{viewerPath ?? "File viewer"}</h4>
             {viewerPath && (
