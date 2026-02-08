@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
+import { flushSync } from "react-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   WorkspaceService,
@@ -48,6 +49,7 @@ import type {
   AgentMode,
   ProjectSnapshot,
   ModelRolePaths,
+  ModelContext,
 } from "./core/types";
 import type { Provider, LocalModelSettings } from "./core";
 import type { FileSnapshot } from "./core/patch/PatchEngine";
@@ -55,6 +57,8 @@ import type { ResumeSuggestion } from "./core";
 import { TopBar } from "./components/TopBar";
 import { ConversationPane } from "./components/ConversationPane";
 import { FilesPane } from "./components/FilesPane";
+import { RuntimeStatusPanel } from "./components/RuntimeStatusPanel";
+import { ThinkingPane, type ThinkingLine } from "./components/ThinkingPane";
 import "./App.css";
 
 const workspace = new WorkspaceService();
@@ -141,6 +145,13 @@ export default function App() {
     ...DEFAULT_LOCAL_SETTINGS,
   }));
   const [lastFileChoiceCandidates, setLastFileChoiceCandidates] = useState<string[] | null>(null);
+  const [thinkingLines, setThinkingLines] = useState<ThinkingLine[]>([]);
+  const [pipelineRunning, setPipelineRunning] = useState(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const processingMessageRef = useRef<string | null>(null);
+  const lastHandledMessageIdRef = useRef<string | null>(null);
+  const activeRunIdRef = useRef<string | null>(null);
+  const streamingAssistantIdRef = useRef<string | null>(null);
   const localSettingsRef = useRef(localSettings);
   const toolRootRef = useRef<string | null>(null);
   const portRef = useRef<number>(11435);
@@ -423,15 +434,22 @@ export default function App() {
   }, [fetchSessionsAndResume]);
 
   const sendChatMessage = useCallback(
-    async (prompt: string) => {
+    async (prompt: string, messageId?: string) => {
       const root = workspace.root;
       if (!workspacePath || root == null || root === "") {
         console.warn("[App] sendChatMessage blocked: no workspace root.");
         return;
       }
       const p = (prompt || "").trim() || "(no prompt)";
-      setMessages((prev) => [...prev, { id: `u-${Date.now()}`, role: "user", text: p }]);
+      const id = messageId ?? `u-${Date.now()}`;
+      if (lastHandledMessageIdRef.current !== null) return;
+      lastHandledMessageIdRef.current = id;
+      processingMessageRef.current = p;
+      setMessages((prev) => [...prev, { id, role: "user", text: p }]);
 
+      const nowIso = () => new Date().toISOString();
+      const ts = Date.now();
+      try {
       const num = /^\s*(\d+)\s*$/.exec(p);
       if (lastFileChoiceCandidates && num) {
         const idx = parseInt(num[1], 10);
@@ -487,12 +505,112 @@ export default function App() {
         return;
       }
 
-      // ROUTING: File actions FIRST, before any chat logic
+      // ROUTING: File actions FIRST, before any chat logic (single router call per message)
       const route = routeUserMessage(p);
       console.log("MESSAGE_ROUTING:", route);
+      const routeTarget = "targetPath" in route ? route.targetPath : "";
+      setThinkingLines((prev) => [...prev, { id: `t-${ts}-route`, text: `ROUTE: ${route.action} ${routeTarget}`.trim(), type: "status", timestamp: nowIso() }]);
+
+      if (route.action === "file_read") {
+        setThinkingLines((prev) => [...prev, { id: `t-${ts}-diff-false`, text: "DIFF_PANEL_VISIBLE: false", type: "status", timestamp: nowIso() }]);
+        const fileHint = route.targetPath;
+        setThinkingLines((prev) => [...prev, { id: `t-${ts}-read-1`, text: `Reading ${fileHint}`, type: "status", timestamp: nowIso() }]);
+        const readResult = await readProjectFile(
+          root,
+          fileHint,
+          (path) => workspace.readFile(path),
+          (path) => workspace.exists(path),
+          (wr, name) => workspace.searchFilesByName(wr, name)
+        );
+        if ("error" in readResult && readResult.error === "multiple") {
+          const multi = readResult as { path: string; error: "multiple"; candidates: string[] };
+          setLastFileChoiceCandidates(multi.candidates);
+          setMessages((prev) => [
+            ...prev,
+            { id: `a-${Date.now()}`, role: "assistant", text: `Which file?\n${multi.candidates.map((path: string, i: number) => `${i + 1}. ${path}`).join("\n")}\n\nReply with a number.` },
+          ]);
+          return;
+        }
+        if ("error" in readResult) {
+          setMessages((prev) => [...prev, { id: `a-${Date.now()}`, role: "assistant", text: `${readResult.path} not found.` }]);
+          return;
+        }
+        const resolvedPath = readResult.path;
+        const fileContent = readResult.content;
+        setThinkingLines((prev) => [...prev, { id: `t-${ts}-read-2`, text: "Summarizing", type: "status", timestamp: nowIso() }]);
+        const runId = `file_read-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        activeRunIdRef.current = runId;
+        console.log("[gen] TRUE", runId, { action: "file_read", targetPath: route.targetPath, messageId: id });
+        setStatusLine("Generating reply…");
+        setPipelineRunning(true);
+        const readAc = new AbortController();
+        abortControllerRef.current = readAc;
+        const readAbortPromise = new Promise<never>((_, reject) => {
+          const onAbort = () => reject(new DOMException("Aborted", "AbortError"));
+          if (readAc.signal.aborted) {
+            onAbort();
+            return;
+          }
+          readAc.signal.addEventListener("abort", onAbort);
+        });
+        try {
+          const inspector = new ProjectInspector(workspace);
+          const m = manifest ?? (await inspector.buildManifest());
+          if (!manifest) setManifest(m);
+          const ctxBuilder = new ContextBuilder(workspace, m);
+          const knowledgeStore = useKnowledgePacks ? new KnowledgeStore(root, workspace) : null;
+          const ctx = await ctxBuilder.build(p, [resolvedPath], {
+            useKnowledge: useKnowledgePacks,
+            knowledgeStore: knowledgeStore ?? undefined,
+            agentRole: "coder",
+            projectSnapshot: projectSnapshot ?? undefined,
+            enabledPacks: enabledPacks.length ? enabledPacks : undefined,
+          });
+          const ctxWithContent: ModelContext = {
+            ...ctx,
+            selectedFiles: [{ path: resolvedPath, content: fileContent }],
+          };
+          const tBefore = Date.now();
+          console.log("[gen] file_read before await generateChatResponse", tBefore);
+          const text = await Promise.race([
+            generateChatResponse(ctxWithContent),
+            readAbortPromise,
+          ]);
+          console.log("[gen] file_read after resolve", { len: text?.length ?? 0, first80: (text ?? "").slice(0, 80), dt: Date.now() - tBefore });
+          if (typeof text === "string" && text.length > 0) {
+            setThinkingLines((prev) => [...prev, { id: `t-${ts}-response-ready`, text: `RESPONSE_READY (len=${text.length})`, type: "status", timestamp: nowIso() }]);
+          }
+          const assistantMsg = { id: `a-${Date.now()}`, role: "assistant" as const, text: text ?? "" };
+          console.log("[gen] file_read before setMessages", assistantMsg.id);
+          flushSync(() => {
+            setMessages((prev) => {
+              const next = [...prev, assistantMsg];
+              console.log("[gen] file_read setMessages updater", { prevLen: prev.length, nextLen: next.length });
+              return next;
+            });
+          });
+          console.log("[gen] file_read after setMessages");
+        } catch (e) {
+          const isAbort = (e instanceof DOMException && e.name === "AbortError") || (e && (e as Error).name === "AbortError");
+          if (isAbort) {
+            setThinkingLines((prev) => [...prev, { id: `t-${ts}-read-cancel`, text: "Cancelled.", type: "status", timestamp: nowIso() }]);
+          } else {
+            console.error("sendChatMessage file_read", e);
+            setMessages((prev) => [...prev, { id: `a-${Date.now()}`, role: "assistant", text: `Error: ${String(e)}` }]);
+          }
+        } finally {
+          console.log("[gen] file_read finally: statusLine/pipelineRunning cleared", runId);
+          setStatusLine(null);
+          setPipelineRunning(false);
+          abortControllerRef.current = null;
+        }
+        return;
+      }
 
       if (route.action === "file_open" || route.action === "file_edit") {
         const fileHint = route.targetPath;
+        setThinkingLines((prev) => [...prev, { id: `t-${ts}-open-editor`, text: `OPEN_EDITOR: ${fileHint}`, type: "status", timestamp: nowIso() }]);
+        setThinkingLines((prev) => [...prev, { id: `t-${ts}-diff-true`, text: "DIFF_PANEL_VISIBLE: true", type: "status", timestamp: nowIso() }]);
         const result = await readProjectFile(
           root,
           fileHint,
@@ -525,7 +643,22 @@ export default function App() {
         const diffRequest = hasDiffRequest(p);
         
         if (diffRequest) {
+          const runId = `file_edit_patch-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+          activeRunIdRef.current = runId;
+          console.log("[gen] TRUE", runId, { action: "file_edit_patch", targetPath: resolvedPath, messageId: id });
           setStatusLine("Generating patch…");
+          setPipelineRunning(true);
+          setThinkingLines((prev) => [...prev, { id: `t-${ts}-patch-start`, text: "Patch generation started", type: "status", timestamp: nowIso() }]);
+          const ac = new AbortController();
+          abortControllerRef.current = ac;
+          const abortPromise = new Promise<never>((_, reject) => {
+            const onAbort = () => reject(new DOMException("Aborted", "AbortError"));
+            if (ac.signal.aborted) {
+              onAbort();
+              return;
+            }
+            ac.signal.addEventListener("abort", onAbort);
+          });
           try {
             setFileEditState(null);
             setSelectedPaths([resolvedPath]);
@@ -541,8 +674,12 @@ export default function App() {
               projectSnapshot: projectSnapshot ?? undefined,
               enabledPacks: enabledPacks.length ? enabledPacks : undefined,
             });
-            const patchResult = await generatePlanAndPatch(ctx);
+            const patchResult = await Promise.race([
+              generatePlanAndPatch(ctx),
+              abortPromise,
+            ]);
             setPlanAndPatch(patchResult);
+            setThinkingLines((prev) => [...prev, { id: `t-${ts}-patch-done`, text: "Patch generation finished", type: "status", timestamp: nowIso() }]);
             const engine = new PatchEngine(root, (path) => workspace.readFile(path));
             const preview = await engine.preview(patchResult.patch);
             const map = new Map<string, { old: string; new: string }>();
@@ -560,13 +697,21 @@ export default function App() {
               { id: `a-${Date.now()}`, role: "assistant", text: `Patch for ${resolvedPath}: ${patchResult.explanation}` },
             ]);
           } catch (e) {
-            console.error("sendChatMessage patch", e);
-            setMessages((prev) => [
-              ...prev,
-              { id: `a-${Date.now()}`, role: "assistant", text: `Error: ${String(e)}` },
-            ]);
+            const isAbort = (e instanceof DOMException && e.name === "AbortError") || (e && (e as Error).name === "AbortError");
+            if (isAbort) {
+              setThinkingLines((prev) => [...prev, { id: `t-${ts}-patch-cancel`, text: "Cancelled.", type: "status", timestamp: nowIso() }]);
+            } else {
+              console.error("sendChatMessage patch", e);
+              setMessages((prev) => [
+                ...prev,
+                { id: `a-${Date.now()}`, role: "assistant", text: `Error: ${String(e)}` },
+              ]);
+            }
           } finally {
+            console.log("[gen] FALSE", runId, { action: "file_edit_patch" });
             setStatusLine(null);
+            setPipelineRunning(false);
+            abortControllerRef.current = null;
           }
           return;
         }
@@ -606,9 +751,26 @@ export default function App() {
         return;
       }
 
-      // ROUTING: chat (no file action)
+      // ROUTING: chat (no file action) — only when route.action === "chat"; file_* paths must have returned above
+      if (p === "(no prompt)") return;
+      setThinkingLines((prev) => [...prev, { id: `t-${ts}-fallback-chat`, text: "FALLBACK_CHAT", type: "status", timestamp: nowIso() }]);
       console.log("MESSAGE_ROUTING: chat");
+      const runId = `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      activeRunIdRef.current = runId;
+      console.log("[gen] TRUE", runId, { action: "chat", targetPath: undefined, messageId: id });
       setStatusLine("Generating reply…");
+      setPipelineRunning(true);
+      const chatTs = Date.now();
+      const chatAc = new AbortController();
+      abortControllerRef.current = chatAc;
+      const chatAbortPromise = new Promise<never>((_, reject) => {
+        const onAbort = () => reject(new DOMException("Aborted", "AbortError"));
+        if (chatAc.signal.aborted) {
+          onAbort();
+          return;
+        }
+        chatAc.signal.addEventListener("abort", onAbort);
+      });
       try {
         const inspector = new ProjectInspector(workspace);
         const m = manifest ?? (await inspector.buildManifest());
@@ -629,19 +791,61 @@ export default function App() {
             chunkText: c.chunkText,
           })) ?? []
         );
-        const text = await generateChatResponse(ctx);
-        setMessages((prev) => [
-          ...prev,
-          { id: `a-${Date.now()}`, role: "assistant", text },
+        const assistantId = `a-${chatTs}`;
+        streamingAssistantIdRef.current = assistantId;
+        flushSync(() => {
+          setMessages((prev) => [...prev, { id: assistantId, role: "assistant" as const, text: "" }]);
+        });
+        const tBefore = Date.now();
+        console.log("[gen] chat before await generateChatResponse", tBefore);
+        const text = await Promise.race([
+          generateChatResponse(ctx, {
+            onChunk: (chunk) => {
+              const sid = streamingAssistantIdRef.current;
+              if (!sid) return;
+              setMessages((prev) => {
+                const last = prev[prev.length - 1];
+                if (last?.role !== "assistant" || last?.id !== sid) return prev;
+                return [...prev.slice(0, -1), { ...last, text: last.text + chunk }];
+              });
+            },
+          }),
+          chatAbortPromise,
         ]);
+        console.log("[gen] chat after resolve", { len: text?.length ?? 0, first80: (text ?? "").slice(0, 80), dt: Date.now() - tBefore });
+        streamingAssistantIdRef.current = null;
+        if (typeof text === "string" && text.length > 0) {
+          setThinkingLines((prev) => [...prev, { id: `t-${chatTs}-response-ready`, text: `RESPONSE_READY (len=${text.length})`, type: "status", timestamp: nowIso() }]);
+        }
+        setMessages((prev) => {
+          const next = [...prev];
+          const last = next[next.length - 1];
+          if (last?.role === "assistant" && last?.id === assistantId) {
+            next[next.length - 1] = { ...last, text: (text ?? "").trim() || last.text };
+          }
+          return next;
+        });
+        console.log("[gen] chat after setMessages");
       } catch (e) {
-        console.error("sendChatMessage", e);
-        setMessages((prev) => [
-          ...prev,
-          { id: `a-${Date.now()}`, role: "assistant", text: `Error: ${String(e)}` },
-        ]);
+        const isAbort = (e instanceof DOMException && e.name === "AbortError") || (e && (e as Error).name === "AbortError");
+        if (isAbort) {
+          setThinkingLines((prev) => [...prev, { id: `t-${chatTs}-chat-cancel`, text: "Cancelled.", type: "status", timestamp: nowIso() }]);
+        } else {
+          console.error("sendChatMessage", e);
+          setMessages((prev) => [
+            ...prev,
+            { id: `a-${Date.now()}`, role: "assistant", text: `Error: ${String(e)}` },
+          ]);
+        }
       } finally {
+        console.log("[gen] chat finally: statusLine/pipelineRunning cleared", runId);
         setStatusLine(null);
+        setPipelineRunning(false);
+        abortControllerRef.current = null;
+      }
+      } finally {
+        processingMessageRef.current = null;
+        lastHandledMessageIdRef.current = null;
       }
     },
     [workspacePath, selectedPaths, manifest, useKnowledgePacks, projectSnapshot, enabledPacks, lastFileChoiceCandidates, fetchSessionsAndResume]
@@ -660,13 +864,30 @@ export default function App() {
       const p = (prompt || "").trim() || "(no prompt)";
       setMessages((prev) => [...prev, { id: `u-${Date.now()}`, role: "user", text: p }]);
       setStatusLine("Scanning selected files…");
+      const propTs = Date.now();
+      const propNowIso = () => new Date().toISOString();
       try {
         const inspector = new ProjectInspector(workspace);
         const m = manifest ?? (await inspector.buildManifest());
         if (!manifest) setManifest(m);
         const ctxBuilder = new ContextBuilder(workspace, m);
         const knowledgeStore = useKnowledgePacks ? new KnowledgeStore(root, workspace) : null;
+        const runId = `proposePatch-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        activeRunIdRef.current = runId;
+        console.log("[gen] TRUE", runId, { action: "proposePatch", targetPath: undefined, messageId: undefined });
         setStatusLine("Generating patch…");
+        setPipelineRunning(true);
+        setThinkingLines((prev) => [...prev, { id: `t-${propTs}-prop-start`, text: "Patch generation started", type: "status", timestamp: propNowIso() }]);
+        const propAc = new AbortController();
+        abortControllerRef.current = propAc;
+        const propAbortPromise = new Promise<never>((_, reject) => {
+          const onAbort = () => reject(new DOMException("Aborted", "AbortError"));
+          if (propAc.signal.aborted) {
+            onAbort();
+            return;
+          }
+          propAc.signal.addEventListener("abort", onAbort);
+        });
         const ctx = await ctxBuilder.build(p, selectedPaths, {
           useKnowledge: useKnowledgePacks,
           knowledgeStore: knowledgeStore ?? undefined,
@@ -681,8 +902,12 @@ export default function App() {
             chunkText: c.chunkText,
           })) ?? []
         );
-        const result = await generatePlanAndPatch(ctx);
+        const result = await Promise.race([
+          generatePlanAndPatch(ctx),
+          propAbortPromise,
+        ]);
         setPlanAndPatch(result);
+        setThinkingLines((prev) => [...prev, { id: `t-${propTs}-prop-done`, text: "Patch generation finished", type: "status", timestamp: propNowIso() }]);
         const engine = new PatchEngine(root, (path) =>
           workspace.readFile(path)
         );
@@ -698,17 +923,29 @@ export default function App() {
         setCurrentProposedSessionId(record.id);
         await fetchSessionsAndResume();
       } catch (e) {
-        console.error("proposePatch", e);
-        setMessages((prev) => [
-          ...prev,
-          { id: `a-${Date.now()}`, role: "assistant", text: `Error: ${String(e)}` },
-        ]);
+        const isAbort = (e instanceof DOMException && e.name === "AbortError") || (e && (e as Error).name === "AbortError");
+        if (isAbort) {
+          setThinkingLines((prev) => [...prev, { id: `t-${propTs}-prop-cancel`, text: "Cancelled.", type: "status", timestamp: propNowIso() }]);
+        } else {
+          console.error("proposePatch", e);
+          setMessages((prev) => [
+            ...prev,
+            { id: `a-${Date.now()}`, role: "assistant", text: `Error: ${String(e)}` },
+          ]);
+        }
       } finally {
+        console.log("[gen] FALSE", runId, { action: "proposePatch" });
         setStatusLine(null);
+        setPipelineRunning(false);
+        abortControllerRef.current = null;
       }
     },
     [workspacePath, selectedPaths, manifest, fetchSessionsAndResume, useKnowledgePacks, projectSnapshot, enabledPacks]
   );
+
+  const handleStopPipeline = useCallback(() => {
+    abortControllerRef.current?.abort();
+  }, []);
 
   const executePipeline = useCallback(
     async (prompt: string) => {
@@ -720,44 +957,71 @@ export default function App() {
       setViewingSessionId(null);
       const p = (prompt || "").trim() || "(no prompt)";
       setMessages((prev) => [...prev, { id: `u-${Date.now()}`, role: "user", text: p }]);
-        setStatusLine("Running pipeline…");
-        try {
-          const inspector = new ProjectInspector(workspace);
-          const m = manifest ?? (await inspector.buildManifest());
-          if (!manifest) setManifest(m);
-          const ctxBuilder = new ContextBuilder(workspace, m);
-          const knowledgeStore = useKnowledgePacks ? new KnowledgeStore(root, workspace) : null;
-          const buildOpt = (role: "planner" | "coder" | "reviewer") => ({
-            useKnowledge: useKnowledgePacks,
-            knowledgeStore: knowledgeStore ?? undefined,
-            agentRole: role,
-            projectSnapshot: projectSnapshot ?? undefined,
-            enabledPacks: enabledPacks.length ? enabledPacks : undefined,
-          });
-          const pipelineOverrides =
-            provider === "local"
-              ? {
-                  planner: new LocalPlannerAgent(
-                    () => localSettingsRef.current,
-                    () => toolRootRef.current,
-                    () => runtimePortRef.current ?? portRef.current ?? 11435,
-                    () => ({})
-                  ),
-                  reviewer: new LocalReviewerAgent(
-                    () => localSettingsRef.current,
-                    () => toolRootRef.current,
-                    () => runtimePortRef.current ?? portRef.current ?? 11435,
-                    () => ({})
-                  ),
-                }
-              : undefined;
-          const ctx = await ctxBuilder.build(p, selectedPaths, buildOpt("coder"));
-          const result = await runPipeline(p, ctx, pipelineOverrides);
+      const runId = `executePipeline-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      activeRunIdRef.current = runId;
+      console.log("[gen] TRUE", runId, { action: "executePipeline", targetPath: undefined, messageId: undefined });
+      setStatusLine("Running pipeline…");
+      const ac = new AbortController();
+      abortControllerRef.current = ac;
+      setPipelineRunning(true);
+      const ts = Date.now();
+      const nowIso = () => new Date().toISOString();
+      setThinkingLines((prev) => [...prev, { id: `t-${ts}-0`, text: "Running pipeline…", type: "status", timestamp: nowIso() }]);
+      const abortPromise = new Promise<never>((_, reject) => {
+        const onAbort = () => reject(new DOMException("Aborted", "AbortError"));
+        if (ac.signal.aborted) {
+          onAbort();
+          return;
+        }
+        ac.signal.addEventListener("abort", onAbort);
+      });
+      try {
+        const inspector = new ProjectInspector(workspace);
+        const m = manifest ?? (await inspector.buildManifest());
+        if (!manifest) setManifest(m);
+        const ctxBuilder = new ContextBuilder(workspace, m);
+        const knowledgeStore = useKnowledgePacks ? new KnowledgeStore(root, workspace) : null;
+        const buildOpt = (role: "planner" | "coder" | "reviewer") => ({
+          useKnowledge: useKnowledgePacks,
+          knowledgeStore: knowledgeStore ?? undefined,
+          agentRole: role,
+          projectSnapshot: projectSnapshot ?? undefined,
+          enabledPacks: enabledPacks.length ? enabledPacks : undefined,
+        });
+        const pipelineOverrides =
+          provider === "local"
+            ? {
+                planner: new LocalPlannerAgent(
+                  () => localSettingsRef.current,
+                  () => toolRootRef.current,
+                  () => runtimePortRef.current ?? portRef.current ?? 11435,
+                  () => ({})
+                ),
+                reviewer: new LocalReviewerAgent(
+                  () => localSettingsRef.current,
+                  () => toolRootRef.current,
+                  () => runtimePortRef.current ?? portRef.current ?? 11435,
+                  () => ({})
+                ),
+              }
+            : undefined;
+        const ctx = await ctxBuilder.build(p, selectedPaths, buildOpt("coder"));
+        const result = await Promise.race([
+          runPipeline(p, ctx, pipelineOverrides),
+          abortPromise,
+        ]);
         const pl = result.planner;
         const cod = result.coder;
         setPlannerOutput(pl);
         setPlanAndPatch(cod);
         setReviewerOutput(result.reviewer);
+        setThinkingLines((prev) => {
+          const next = [...prev];
+          next.push({ id: `t-${ts}-plan`, text: (pl.plan || "").trim(), type: "plan", timestamp: nowIso() });
+          next.push({ id: `t-${ts}-coder`, text: "Proposed patch: " + (cod.explanation || "").split(/\n/)[0]?.slice(0, 120) || "—", type: "action", timestamp: nowIso() });
+          next.push({ id: `t-${ts}-review`, text: (result.reviewer?.reviewNotes || "").trim().slice(0, 500) || "—", type: "review", timestamp: nowIso() });
+          return next;
+        });
         setLastRetrievedChunks(
           ctx.knowledgeChunks?.map((c) => ({
             title: c.title,
@@ -765,7 +1029,7 @@ export default function App() {
             chunkText: c.chunkText,
           })) ?? []
         );
-        const engine = new PatchEngine(root, (path) => workspace.readFile(path));
+        const engine = new PatchEngine(root, (path: string) => workspace.readFile(path));
         const preview = await engine.preview(cod.patch);
         const map = new Map<string, { old: string; new: string }>();
         preview.forEach((v, k) => map.set(k, v));
@@ -778,13 +1042,24 @@ export default function App() {
         setCurrentProposedSessionId(record.id);
         await fetchSessionsAndResume();
       } catch (e) {
-        console.error("executePipeline", e);
-        setMessages((prev) => [
-          ...prev,
-          { id: `a-${Date.now()}`, role: "assistant", text: `Error: ${String(e)}` },
-        ]);
+        const isAbort =
+          (e instanceof DOMException && e.name === "AbortError") ||
+          (e && (e as Error).name === "AbortError");
+        if (isAbort) {
+          setThinkingLines((prev) => [...prev, { id: `t-${ts}-cancel`, text: "Cancelled.", type: "status", timestamp: nowIso() }]);
+        } else {
+          console.error("executePipeline", e);
+          setThinkingLines((prev) => [...prev, { id: `t-${ts}-err`, text: "Error: " + String(e), type: "error", timestamp: nowIso() }]);
+          setMessages((prev) => [
+            ...prev,
+            { id: `a-${Date.now()}`, role: "assistant", text: `Error: ${String(e)}` },
+          ]);
+        }
       } finally {
+        console.log("[gen] FALSE", runId, { action: "executePipeline" });
         setStatusLine(null);
+        setPipelineRunning(false);
+        abortControllerRef.current = null;
       }
     },
     [workspacePath, selectedPaths, manifest, fetchSessionsAndResume, useKnowledgePacks, provider, projectSnapshot, enabledPacks]
@@ -1142,7 +1417,7 @@ export default function App() {
   return (
     <div className="app app-single-flow">
       <TopBar workspacePath={workspacePath} onOpenWorkspace={openWorkspace} />
-      <div className="main-two-pane">
+      <div className="main-three-pane">
         <ConversationPane
           messages={messages}
           planAndPatch={planAndPatch}
@@ -1169,10 +1444,6 @@ export default function App() {
           provider={provider}
           onProviderChange={setProvider}
           toolRoot={toolRoot}
-          port={port}
-          runtimePort={runtimePort}
-          activeGgufPath={(modelRoles?.coder ?? localSettings.ggufPath ?? "").trim() || null}
-          ggufPathMissing={ggufPathMissing}
           localSettings={localSettings}
           onLocalSettingsChange={setLocalSettings}
           onRescanModels={rescanModels}
@@ -1212,6 +1483,25 @@ export default function App() {
           onSetBaseline={handleSetBaseline}
           onResetToBaseline={handleResetToBaseline}
         />
+        <div className="right-pane">
+          {provider === "local" && (
+            <div className="runtime-status-wrap">
+              <RuntimeStatusPanel
+                workspaceRoot={workspacePath}
+                toolRoot={toolRoot}
+                port={port}
+                runtimePort={runtimePort}
+                activeGgufPath={(modelRoles?.coder ?? localSettings.ggufPath ?? "").trim() || undefined}
+                ggufPathMissing={ggufPathMissing ?? undefined}
+              />
+            </div>
+          )}
+          <ThinkingPane
+            lines={thinkingLines}
+            isRunning={pipelineRunning}
+            onStop={handleStopPipeline}
+          />
+        </div>
       </div>
     </div>
   );

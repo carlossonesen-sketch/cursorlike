@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tauri::Emitter;
 
 #[derive(Default)]
 pub struct RuntimeState {
@@ -49,6 +50,8 @@ pub struct GenerateOptions {
 
 const DEFAULT_PORT: u16 = 11435;
 const HEALTH_TIMEOUT_MS: u64 = 1000;
+/// Max time for chat/completion HTTP request (send + read body). Prevents hanging when server streams or never closes.
+const CHAT_REQUEST_TIMEOUT_SECS: u64 = 300;
 
 /// Probe order: /v1/models (OpenAI-compatible), /health, /healthz. Returns (true, endpoint) if any returns 200.
 async fn probe_runtime_health(port: u16) -> (bool, Option<String>) {
@@ -356,6 +359,23 @@ struct ChatCompletionsResponse {
     choices: Option<Vec<ChatChoice>>,
 }
 
+/// SSE stream chunk: choices[0].delta.content (OpenAI-style).
+#[derive(serde::Deserialize)]
+struct StreamDelta {
+    content: Option<String>,
+}
+#[derive(serde::Deserialize)]
+struct StreamChoice {
+    delta: Option<StreamDelta>,
+}
+#[derive(serde::Deserialize)]
+struct StreamChunk {
+    choices: Option<Vec<StreamChoice>>,
+}
+
+/// Hard timeout: abort if no chunk arrives for this long.
+const STREAM_CHUNK_TIMEOUT_SECS: u64 = 60;
+
 #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChatOptions {
     #[serde(default)]
@@ -401,7 +421,13 @@ pub async fn runtime_chat(
         stream: false,
     };
 
-    let client = reqwest::Client::new();
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(CHAT_REQUEST_TIMEOUT_SECS))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return Err(format!("HTTP client build: {}", e)),
+    };
     if let Ok(resp) = client.post(&url_completions).json(&body_completions).send().await {
         if resp.status().is_success() {
             if let Ok(json) = resp.json::<ChatCompletionsResponse>().await {
@@ -427,7 +453,14 @@ pub async fn runtime_chat(
         stream: false,
     };
 
-    let resp = client
+    let client_fallback = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(CHAT_REQUEST_TIMEOUT_SECS))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return Err(format!("HTTP client build: {}", e)),
+    };
+    let resp = client_fallback
         .post(&url_completion)
         .json(&body_completion)
         .send()
@@ -445,6 +478,114 @@ pub async fn runtime_chat(
 
     let json: CompletionResponse = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
     Ok(json.content.unwrap_or_default().trim().to_string())
+}
+
+/// Stream /v1/chat/completions (SSE). Emits "runtime-chat-delta" per chunk, then "runtime-chat-done" with full text.
+/// Aborts if no chunk arrives within STREAM_CHUNK_TIMEOUT_SECS. Returns Ok(()) on success, Err on timeout/connection/parse.
+#[tauri::command]
+pub async fn runtime_chat_stream(
+    app: tauri::AppHandle,
+    system_prompt: String,
+    user_prompt: String,
+    options: Option<ChatOptions>,
+    state: tauri::State<'_, Mutex<RuntimeState>>,
+) -> Result<(), String> {
+    let port = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        s.port.ok_or_else(|| {
+            "Runtime not started. Start the runtime with a GGUF model first.".to_string()
+        })?
+    };
+
+    let opt = options.unwrap_or_default();
+    let max_tokens = if opt.max_tokens > 0 { opt.max_tokens } else { 512 };
+    let temperature = if opt.temperature >= 0.0 && opt.temperature <= 2.0 {
+        opt.temperature
+    } else {
+        0.5
+    };
+
+    let url = format!("http://127.0.0.1:{}/v1/chat/completions", port);
+    let body = ChatCompletionsRequest {
+        model: "llama".to_string(),
+        messages: vec![
+            ChatMessage { role: "system".to_string(), content: system_prompt },
+            ChatMessage { role: "user".to_string(), content: user_prompt },
+        ],
+        max_tokens,
+        temperature,
+        stream: true,
+    };
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("HTTP client build: {}", e))?;
+
+    let mut resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("llama-server HTTP {}: {}", status, text));
+    }
+
+    let mut buf: Vec<u8> = Vec::new();
+    let mut full_text = String::new();
+
+    loop {
+        let chunk_result = tokio::time::timeout(
+            Duration::from_secs(STREAM_CHUNK_TIMEOUT_SECS),
+            resp.chunk(),
+        )
+        .await;
+
+        match chunk_result {
+            Err(_) => {
+                return Err(format!(
+                    "Stream timeout: no data received for {}s",
+                    STREAM_CHUNK_TIMEOUT_SECS
+                ));
+            }
+            Ok(Ok(None)) => break,
+            Ok(Ok(Some(bytes))) => {
+                buf.extend_from_slice(&bytes);
+                while let Some(line_end) = buf.iter().position(|&b| b == b'\n') {
+                    let line_bytes: Vec<u8> = buf.drain(..=line_end).collect();
+                    let line = String::from_utf8_lossy(&line_bytes).trim().to_string();
+                    if line.starts_with("data: ") {
+                        let rest = line["data: ".len()..].trim();
+                        if rest == "[DONE]" {
+                            break;
+                        }
+                        if let Ok(chunk) = serde_json::from_str::<StreamChunk>(rest) {
+                            if let Some(choices) = chunk.choices {
+                                if let Some(first) = choices.into_iter().next() {
+                                    if let Some(delta) = first.delta {
+                                        if let Some(content) = delta.content {
+                                            if !content.is_empty() {
+                                                full_text.push_str(&content);
+                                                let _ = app.emit("runtime-chat-delta", &content);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Err(e)) => return Err(format!("Stream read error: {}", e)),
+        }
+    }
+
+    let _ = app.emit("runtime-chat-done", &full_text);
+    Ok(())
 }
 
 #[tauri::command]

@@ -4,6 +4,7 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 export type Provider = "mock" | "local";
 
@@ -67,6 +68,44 @@ export async function runtimeChat(
     systemPrompt,
     userPrompt,
     options: options ?? undefined,
+  });
+}
+
+/** Stream /v1/chat/completions (SSE). Calls onChunk for each token; resolves with full text when done. Rejects on timeout or backend error. */
+export async function runtimeChatStream(
+  systemPrompt: string,
+  userPrompt: string,
+  options: ChatOptions | undefined,
+  callbacks: { onChunk: (chunk: string) => void }
+): Promise<string> {
+  return new Promise<string>(async (resolve, reject) => {
+    let settled = false;
+    const unlistenDelta = await listen<string>("runtime-chat-delta", (e) => {
+      callbacks.onChunk(e.payload ?? "");
+    });
+    const unlistenDone = await listen<string>("runtime-chat-done", (e) => {
+      if (!settled) {
+        settled = true;
+        unlistenDelta();
+        unlistenDone();
+        resolve(e.payload ?? "");
+      }
+    });
+
+    try {
+      await invoke("runtime_chat_stream", {
+        systemPrompt,
+        userPrompt,
+        options: options ?? undefined,
+      });
+    } catch (err) {
+      if (!settled) {
+        settled = true;
+        unlistenDelta();
+        unlistenDone();
+        reject(err);
+      }
+    }
   });
 }
 

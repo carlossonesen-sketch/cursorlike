@@ -5,10 +5,14 @@
 
 import type { ModelContext, PlanAndPatch } from "../types";
 
+export interface ChatResponseOptions {
+  onChunk?: (chunk: string) => void;
+}
+
 export interface IModelProvider {
   generatePlanAndPatch(ctx: ModelContext): Promise<PlanAndPatch>;
-  /** Chat-only: plain text reply, no diff. Use for "Send" / Enter. */
-  generateChatResponse(ctx: ModelContext): Promise<string>;
+  /** Chat-only: plain text reply, no diff. Use for "Send" / Enter. options.onChunk enables streaming. */
+  generateChatResponse(ctx: ModelContext, options?: ChatResponseOptions): Promise<string>;
 }
 
 /** Build a minimal unified diff that prepends lines to oldStr. */
@@ -32,7 +36,7 @@ function buildPrependPatch(path: string, oldStr: string, prepend: string): strin
 
 /** Deterministic mock: returns fixed explanation + valid unified diff for demo. */
 export class MockModelProvider implements IModelProvider {
-  async generateChatResponse(ctx: ModelContext): Promise<string> {
+  async generateChatResponse(ctx: ModelContext, _options?: ChatResponseOptions): Promise<string> {
     const q = ctx.prompt.slice(0, 120);
     const files = ctx.selectedFiles.length
       ? ` Context files: ${ctx.selectedFiles.map((f) => f.path).join(", ")}.`
@@ -79,6 +83,9 @@ export async function generatePlanAndPatch(ctx: ModelContext): Promise<PlanAndPa
   return defaultProvider.generatePlanAndPatch(ctx);
 }
 
-export async function generateChatResponse(ctx: ModelContext): Promise<string> {
-  return defaultProvider.generateChatResponse(ctx);
+export async function generateChatResponse(
+  ctx: ModelContext,
+  options?: ChatResponseOptions
+): Promise<string> {
+  return defaultProvider.generateChatResponse(ctx, options);
 }

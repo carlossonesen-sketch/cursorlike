@@ -40,6 +40,7 @@ pub fn run() {
             runtime::runtime_health_probe,
             runtime::runtime_start,
             runtime::runtime_chat,
+            runtime::runtime_chat_stream,
             runtime::runtime_status,
             runtime::runtime_stop,
             runtime::runtime_generate,

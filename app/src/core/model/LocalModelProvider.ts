@@ -9,9 +9,11 @@ import {
   ensureLocalRuntime,
   runtimeGenerate,
   runtimeChat,
+  runtimeChatStream,
   getRuntimeBaseUrl,
   type LocalModelSettings,
   type GenerateOptions,
+  type ChatOptions,
 } from "../runtime/runtimeApi";
 import { extractUnifiedDiff, extractExplanation } from "../runtime/parseCoderOutput";
 
@@ -120,20 +122,44 @@ export class LocalModelProvider implements IModelProvider {
     return { explanation, patch };
   }
 
-  async generateChatResponse(ctx: ModelContext): Promise<string> {
+  async generateChatResponse(
+    ctx: ModelContext,
+    options?: { onChunk?: (chunk: string) => void }
+  ): Promise<string> {
     const settings = this.getSettings();
+    const t0 = Date.now();
+    console.log("[gen] ensureRuntime start", t0);
     const port = await ensureLocalRuntime(settings, this.getToolRoot(), this.getPort());
+    console.log("[gen] ensureRuntime done", Date.now() - t0);
     const baseUrl = getRuntimeBaseUrl(port);
-    console.log("[runtime] request", "POST", baseUrl + "/v1/chat/completions");
     const userPrompt = buildChatUserPrompt(ctx);
     const opts = this.getGenerateOptions();
     const maxTokens = Math.min(512, opts.max_tokens ?? settings.max_tokens);
     const temperature = Math.max(0.2, Math.min(0.7, opts.temperature ?? settings.temperature));
+    const chatOpts: ChatOptions = { max_tokens: maxTokens, temperature };
+
+    if (options?.onChunk) {
+      try {
+        console.log("[runtime] request (stream)", "POST", baseUrl + "/v1/chat/completions");
+        const t1 = Date.now();
+        const raw = await runtimeChatStream(
+          CHAT_SYSTEM_PROMPT,
+          userPrompt,
+          chatOpts,
+          { onChunk: options.onChunk }
+        );
+        console.log("[gen] runtimeChatStream done", Date.now() - t1);
+        return (raw || "").trim() || "No response.";
+      } catch (_) {
+        console.log("[runtime] stream failed, falling back to non-streaming");
+      }
+    }
+
     try {
-      const raw = await runtimeChat(CHAT_SYSTEM_PROMPT, userPrompt, {
-        max_tokens: maxTokens,
-        temperature,
-      });
+      console.log("[runtime] request", "POST", baseUrl + "/v1/chat/completions");
+      const t1 = Date.now();
+      const raw = await runtimeChat(CHAT_SYSTEM_PROMPT, userPrompt, chatOpts);
+      console.log("[gen] runtimeChat done", Date.now() - t1);
       return (raw || "").trim() || "No response.";
     } catch (e) {
       const msg = String(e);
