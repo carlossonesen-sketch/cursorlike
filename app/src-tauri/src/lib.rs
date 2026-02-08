@@ -29,6 +29,8 @@ pub fn run() {
             project_root::detect_project_root,
             toolroot::find_tool_root,
             toolroot::get_global_models_dir,
+            toolroot::resolve_tool_root_cmd,
+            toolroot::path_exists,
             toolroot::discover_gguf_models,
             toolroot::scan_models_for_gguf,
             toolroot::scan_models_for_gguf_by_mtime,

@@ -21,8 +21,12 @@ fn path_should_ignore(p: &Path) -> bool {
 
 #[cfg(windows)]
 const LLAMA_EXE: &str = "runtime/llama/llama-server.exe";
+#[cfg(windows)]
+const LLAMA_EXE_ALT: &str = "runtime/llama/llama-server";
 #[cfg(not(windows))]
 const LLAMA_EXE: &str = "runtime/llama/llama-server";
+#[cfg(not(windows))]
+const LLAMA_EXE_ALT: &str = "runtime/llama/llama-server.exe";
 
 const MODELS_DIR: &str = "models";
 const GGUF_EXT: &str = ".gguf";
@@ -144,30 +148,99 @@ pub fn scan_models_for_gguf_by_mtime(tool_root: String) -> Result<Option<ScanMod
     }))
 }
 
-/// Return the global models directory: %LOCALAPPDATA%\DevAssistantCursorLite\tools\models (Windows)
-/// or $HOME/.local/share/DevAssistantCursorLite/tools/models (Unix). Does not create it.
-#[tauri::command]
-pub fn get_global_models_dir() -> Result<String, String> {
+/// Global tool root: %LOCALAPPDATA%\DevAssistantCursorLite\tools (Windows) or $HOME/.local/share/DevAssistantCursorLite/tools (Unix).
+pub fn get_global_tool_root() -> Result<PathBuf, String> {
     #[cfg(windows)]
     {
         let local = std::env::var("LOCALAPPDATA").map_err(|_| "LOCALAPPDATA not set".to_string())?;
-        let p = PathBuf::from(local)
+        Ok(PathBuf::from(local)
             .join("DevAssistantCursorLite")
-            .join("tools")
-            .join(MODELS_DIR);
-        Ok(p.to_string_lossy().replace('\\', "/"))
+            .join("tools"))
     }
     #[cfg(not(windows))]
     {
         let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-        let p = PathBuf::from(home)
+        Ok(PathBuf::from(home)
             .join(".local")
             .join("share")
             .join("DevAssistantCursorLite")
-            .join("tools")
-            .join(MODELS_DIR);
-        Ok(p.to_string_lossy().replace('\\', "/"))
+            .join("tools"))
     }
+}
+
+/// Return the global models directory: %LOCALAPPDATA%\DevAssistantCursorLite\tools\models (Windows)
+/// or $HOME/.local/share/DevAssistantCursorLite/tools/models (Unix). Does not create it.
+#[tauri::command]
+pub fn get_global_models_dir() -> Result<String, String> {
+    let root = get_global_tool_root()?;
+    let p = root.join(MODELS_DIR);
+    Ok(p.to_string_lossy().replace('\\', "/"))
+}
+
+/// Check if path contains a valid llama-server executable (either .exe or no extension).
+fn llama_exe_exists_at(root: &Path) -> Option<PathBuf> {
+    let a = root.join(LLAMA_EXE);
+    if a.is_file() {
+        return Some(a);
+    }
+    let b = root.join(LLAMA_EXE_ALT);
+    if b.is_file() {
+        return Some(b);
+    }
+    None
+}
+
+/// Resolve tool root: use UI path if it contains runtime/llama/llama-server(.exe), else global tool root.
+/// Returns the resolved PathBuf or an error listing the paths checked.
+pub fn resolve_tool_root(tool_root_from_ui: Option<&str>) -> Result<PathBuf, String> {
+    let mut checked: Vec<String> = Vec::new();
+    if let Some(tr) = tool_root_from_ui {
+        let tr = tr.trim();
+        if !tr.is_empty() {
+            let root = PathBuf::from(tr.replace('\\', "/"));
+            if llama_exe_exists_at(&root).is_some() {
+                return Ok(root);
+            }
+            checked.push(exe_path_display(&root, LLAMA_EXE));
+            #[cfg(windows)]
+            checked.push(exe_path_display(&root, LLAMA_EXE_ALT));
+        }
+    }
+    let global = get_global_tool_root().map_err(|e| {
+        format!(
+            "Global tool root unavailable: {}. Paths checked: {}",
+            e,
+            checked.join("; ")
+        )
+    })?;
+    checked.push(global.join(LLAMA_EXE).to_string_lossy().into_owned());
+    #[cfg(windows)]
+    checked.push(global.join(LLAMA_EXE_ALT).to_string_lossy().into_owned());
+    if llama_exe_exists_at(&global).is_some() {
+        return Ok(global);
+    }
+    Err(format!(
+        "llama-server not found. Checked: {}",
+        checked.join("; ")
+    ))
+}
+
+fn exe_path_display(root: &Path, rel: &str) -> String {
+    root.join(rel).to_string_lossy().replace('\\', "/")
+}
+
+/// Resolve tool root (Tauri command for frontend). Returns absolute path with forward slashes.
+#[tauri::command]
+pub fn resolve_tool_root_cmd(tool_root_from_ui: Option<String>) -> Result<String, String> {
+    let path = resolve_tool_root(tool_root_from_ui.as_deref())?;
+    Ok(path.to_string_lossy().replace('\\', "/"))
+}
+
+/// Check if path exists as a file (for GGUF path validation).
+#[tauri::command]
+pub fn path_exists(path: String) -> Result<bool, String> {
+    let p = PathBuf::from(path.trim());
+    Ok(p.is_file())
 }
 
 #[derive(serde::Serialize)]

@@ -51,6 +51,8 @@ export {
   runtimeStop,
   runtimeGenerate,
   ensureLocalRuntime,
+  getResolvedToolRoot,
+  pathExists,
   DEFAULT_LOCAL_SETTINGS,
 } from "./runtime/runtimeApi";
 export type {

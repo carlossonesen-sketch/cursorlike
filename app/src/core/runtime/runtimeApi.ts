@@ -82,6 +82,18 @@ export async function toolRootExists(toolRoot: string, relPath: string): Promise
   return invoke<boolean>("tool_root_exists", { toolRoot, relPath });
 }
 
+/** Resolve tool root: UI path if valid, else global %LOCALAPPDATA%\\DevAssistantCursorLite\\tools. Throws if not found. */
+export async function getResolvedToolRoot(toolRootFromUi: string | null): Promise<string> {
+  return invoke<string>("resolve_tool_root_cmd", {
+    toolRootFromUi: toolRootFromUi ?? undefined,
+  });
+}
+
+/** Check if path exists as a file (e.g. GGUF path). */
+export async function pathExists(path: string): Promise<boolean> {
+  return invoke<boolean>("path_exists", { path: path ?? "" });
+}
+
 /** GET http://127.0.0.1:port/health; true if 200. */
 export async function runtimeHealthCheck(port: number): Promise<boolean> {
   return invoke<boolean>("runtime_health_check", { port });
@@ -145,7 +157,7 @@ export async function runtimeGenerate(
   });
 }
 
-/** Ensure local runtime is running; start with toolRoot/model/port if not. Throws if toolRoot or model missing. */
+/** Ensure local runtime is running; start with toolRoot/model/port if not. Backend resolves tool root (global fallback). Throws if model missing or start fails. */
 export async function ensureLocalRuntime(
   settings: LocalModelSettings,
   toolRoot: string | null,
@@ -156,11 +168,8 @@ export async function ensureLocalRuntime(
   if (status.running && status.port === usePort) {
     return usePort;
   }
-  if (!toolRoot?.trim()) {
-    throw new Error("Could not find runtime/llama/llama-server.exe. Expected under toolRoot/runtime/llama.");
-  }
   if (!settings.ggufPath?.trim()) {
-    throw new Error("GGUF model path is required for local provider. Add a .gguf to toolRoot/models.");
+    throw new Error("GGUF model path is required for local provider. Add a .gguf in Settings > Models.");
   }
   const result = await runtimeStart(settings.ggufPath, toolRoot, {
     temperature: settings.temperature,

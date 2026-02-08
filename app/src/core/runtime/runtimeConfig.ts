@@ -6,8 +6,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
   findToolRoot,
+  getResolvedToolRoot,
   resolveModelPath,
-  toolRootExists,
   runtimeStart,
   runtimeHealthCheck,
 } from "./runtimeApi";
@@ -137,8 +137,14 @@ export async function detectRuntimeStatus(
 
   const workspaceRootAbs = await resolveWorkspaceRoot(raw);
   const root = workspaceRootAbs || raw;
-  const toolRoot = await findToolRoot(root);
-  const projectRoot = toolRoot ?? root;
+  const findRoot = await findToolRoot(root);
+  let resolvedToolRoot: string | null = null;
+  try {
+    resolvedToolRoot = await getResolvedToolRoot(findRoot);
+  } catch {
+    /* backend fallback failed too */
+  }
+  const projectRoot = resolvedToolRoot ?? findRoot ?? root;
   /* Log/config under workspace root (same as sessions.json / settings.json). */
   let logFilePath = "";
   let runtimeConfigPath = "";
@@ -155,14 +161,14 @@ export async function detectRuntimeStatus(
     /* leave empty if resolve fails */
   }
 
-  const runtimeFound = await toolRootExists(projectRoot, LLAMA_REL);
+  const runtimeFound = resolvedToolRoot != null;
   const scan = await scanModelsByMtime(projectRoot);
 
   return {
     runtimeFound,
     modelFound: !!scan,
     workspaceRoot: root,
-    toolRoot,
+    toolRoot: resolvedToolRoot ?? findRoot,
     logFilePath,
     runtimeConfigPath,
   };
@@ -232,23 +238,25 @@ export async function startLocalModel(
   }
   const logPath = ensured.logFilePath;
 
-  const toolRoot = await findToolRoot(baseDir || raw);
-  const projectRoot = toolRoot ?? baseDir ?? raw;
-
-  const runtimeOk = await toolRootExists(projectRoot, LLAMA_REL);
-  if (!runtimeOk) {
+  let resolvedToolRoot: string | null = null;
+  try {
+    const findRoot = await findToolRoot(baseDir || raw);
+    resolvedToolRoot = await getResolvedToolRoot(findRoot);
+  } catch (e) {
     const stub = stubConfig(port);
     await writeRuntimeConfig(baseDir, stub).catch(() => {});
-    const marker = `[runtime] startLocalModel ${iso} status=missing_runtime model=none port=${port}`;
+    const errMsg = String(e).replace(/\r?\n/g, " ");
+    const marker = `[runtime] startLocalModel ${iso} status=missing_runtime model=none port=${port} details=${errMsg}`;
     await appendRuntimeLogMarker(baseDir, marker).catch(() => {});
-    return { status: "missing_runtime", details: "runtime/llama/llama-server.exe not found." };
+    return { status: "missing_runtime", details: String(e) };
   }
+  const projectRoot = resolvedToolRoot ?? baseDir ?? raw;
 
   const scan = await scanModelsByMtime(projectRoot);
   if (!scan) {
     const stub = stubConfig(port);
     await writeRuntimeConfig(baseDir, stub).catch(() => {});
-    const marker = `[runtime] startLocalModel ${iso} status=missing_model model=none port=${port}`;
+    const marker = `[runtime] startLocalModel ${iso} status=missing_model model=none port=${port} details=No .gguf in models/ under ${projectRoot}`;
     await appendRuntimeLogMarker(baseDir, marker).catch(() => {});
     return { status: "missing_model", details: "No .gguf in models/." };
   }
@@ -298,11 +306,14 @@ export async function startLocalModel(
   await writeRuntimeConfig(baseDir, cfg).catch(() => {});
 
   try {
-    await runtimeStart(modelAbs, toolRoot ?? projectRoot, {
+    await runtimeStart(modelAbs, resolvedToolRoot, {
       context_length: DEFAULT_CTX,
     }, port, logPath);
     return { status: "started" };
   } catch (e) {
+    const errMsg = String(e).replace(/\r?\n/g, " ");
+    const errMarker = `[runtime] startLocalModel ${iso} status=error model=${modelAbs} port=${port} details=${errMsg}`;
+    await appendRuntimeLogMarker(baseDir, errMarker).catch(() => {});
     return { status: "error", details: String(e) };
   }
 }

@@ -6,13 +6,17 @@ import {
   ensureLogDir,
   type StartLocalModelStatus,
 } from "../core/runtime/runtimeConfig";
-import { runtimeStatus, getRuntimeLogLines } from "../core/runtime/runtimeApi";
+import { runtimeStatus, getRuntimeLogLines, getResolvedToolRoot } from "../core/runtime/runtimeApi";
 
 type ServerStatus = "—" | "starting" | "running" | "error";
 type PanelSize = "small" | "medium" | "large";
 
 interface RuntimeStatusPanelProps {
   workspaceRoot: string | null;
+  toolRoot?: string | null;
+  port?: number;
+  activeGgufPath?: string | null;
+  ggufPathMissing?: string | null;
 }
 
 function CopyablePath({ label, path }: { label: string; path: string }) {
@@ -25,7 +29,13 @@ function CopyablePath({ label, path }: { label: string; path: string }) {
   );
 }
 
-export function RuntimeStatusPanel({ workspaceRoot }: RuntimeStatusPanelProps) {
+export function RuntimeStatusPanel({
+  workspaceRoot,
+  toolRoot: toolRootProp,
+  port: portProp,
+  activeGgufPath,
+  ggufPathMissing,
+}: RuntimeStatusPanelProps) {
   const [minimized, setMinimized] = useState(false);
   const [size, setSize] = useState<PanelSize>("medium");
   const [detailsExpanded, setDetailsExpanded] = useState(false);
@@ -75,7 +85,10 @@ export function RuntimeStatusPanel({ workspaceRoot }: RuntimeStatusPanelProps) {
     if (!workspaceRoot) return;
     try {
       const s = await runtimeStatus();
-      if (s.running && s.port != null) setServerStatus("running");
+      if (s.running && s.port != null) {
+        setServerStatus("running");
+        setCurrentPort(s.port);
+      }
     } catch {
       /* ignore */
     }
@@ -86,6 +99,11 @@ export function RuntimeStatusPanel({ workspaceRoot }: RuntimeStatusPanelProps) {
     const t = setInterval(refreshRunning, 3000);
     return () => clearInterval(t);
   }, [serverStatus, refreshRunning]);
+
+  useEffect(() => {
+    if (!workspaceRoot) return;
+    runtimeStatus().then((s) => { if (s.port != null) setCurrentPort(s.port); }).catch(() => {});
+  }, [workspaceRoot]);
 
   const refreshLogs = useCallback(async () => {
     if (!paths.workspaceRoot) return;
@@ -162,6 +180,29 @@ export function RuntimeStatusPanel({ workspaceRoot }: RuntimeStatusPanelProps) {
     }
   }, [logRoot, detect]);
 
+  const [currentPort, setCurrentPort] = useState<number | null>(null);
+
+  const handleCopyDebugInfo = useCallback(async () => {
+    let resolved = paths.toolRoot ?? "";
+    try {
+      resolved = await getResolvedToolRoot(toolRootProp ?? null);
+    } catch {
+      /* use paths.toolRoot */
+    }
+    const port = currentPort ?? portProp ?? 11435;
+    const lines = [
+      "resolvedToolRoot=" + resolved,
+      "activeGgufPath=" + (activeGgufPath ?? ""),
+      "port=" + port,
+      "lastError=" + (lastError ?? ""),
+    ];
+    try {
+      await navigator.clipboard.writeText(lines.join("\n"));
+    } catch {
+      /* ignore */
+    }
+  }, [paths.toolRoot, toolRootProp, currentPort, portProp, activeGgufPath, lastError]);
+
   return (
     <div className={`runtime-status-panel runtime-status-size-${size}`}>
       <div className="runtime-status-header">
@@ -215,9 +256,21 @@ export function RuntimeStatusPanel({ workspaceRoot }: RuntimeStatusPanelProps) {
               <span className="runtime-status-label">Server</span>
               <span className="runtime-status-value">{serverStatus}</span>
             </div>
+            {(portProp != null || currentPort != null) && (
+              <div className="runtime-status-row">
+                <span className="runtime-status-label">Port</span>
+                <span className="runtime-status-value">{String(currentPort ?? portProp ?? "")}</span>
+              </div>
+            )}
           </div>
-          {(lastError || lastResult != null || createLogDirResult != null) && (
+          {(ggufPathMissing || lastError || lastResult != null || createLogDirResult != null) && (
             <div className="runtime-status-extra">
+              {ggufPathMissing && (
+                <div className="runtime-status-row runtime-status-error">
+                  <span className="runtime-status-label">GGUF not found</span>
+                  <span className="runtime-status-value" title={ggufPathMissing}>{ggufPathMissing}</span>
+                </div>
+              )}
               {lastError && (
                 <div className="runtime-status-row runtime-status-error">
                   <span className="runtime-status-label">Last error</span>
@@ -262,6 +315,13 @@ export function RuntimeStatusPanel({ workspaceRoot }: RuntimeStatusPanelProps) {
             >
               Create log dir
             </button>
+            <button
+              type="button"
+              className="btn secondary"
+              onClick={handleCopyDebugInfo}
+            >
+              Copy debug info
+            </button>
           </div>
           <div className="runtime-status-log-wrap">
             <div className="runtime-status-log-title">Runtime Logs</div>
@@ -297,7 +357,12 @@ export function RuntimeStatusPanel({ workspaceRoot }: RuntimeStatusPanelProps) {
             {detailsExpanded && (
               <div className="runtime-status-paths">
                 <CopyablePath label="workspaceRoot" path={paths.workspaceRoot} />
-                <CopyablePath label="toolRoot" path={paths.toolRoot ?? ""} />
+                <CopyablePath label="toolRoot (resolved)" path={paths.toolRoot ?? ""} />
+                <CopyablePath label="activeGgufPath" path={activeGgufPath ?? ""} />
+                <div className="runtime-status-row runtime-status-path">
+                  <span className="runtime-status-label">port</span>
+                  <code className="runtime-status-path-value">{String(currentPort ?? portProp ?? "—")}</code>
+                </div>
                 <CopyablePath label="logFilePath" path={paths.logFilePath} />
                 <CopyablePath label="runtimeConfigPath" path={paths.runtimeConfigPath} />
               </div>

@@ -46,6 +46,9 @@ interface ConversationPaneProps {
   provider: Provider;
   onProviderChange: (value: Provider) => void;
   toolRoot: string | null;
+  port?: number;
+  activeGgufPath?: string | null;
+  ggufPathMissing?: string | null;
   localSettings: LocalModelSettings;
   onLocalSettingsChange: (value: LocalModelSettings) => void;
   onRescanModels: () => void;
@@ -88,6 +91,9 @@ export function ConversationPane({
   provider,
   onProviderChange: _onProviderChange,
   toolRoot,
+  port,
+  activeGgufPath,
+  ggufPathMissing,
   localSettings,
   onLocalSettingsChange,
   onRescanModels,
@@ -153,7 +159,13 @@ export function ConversationPane({
     <div className="conversation-pane">
       {provider === "local" && (
         <div className="runtime-status-wrap">
-          <RuntimeStatusPanel workspaceRoot={workspaceRoot} />
+          <RuntimeStatusPanel
+            workspaceRoot={workspaceRoot}
+            toolRoot={toolRoot}
+            port={port}
+            activeGgufPath={activeGgufPath ?? undefined}
+            ggufPathMissing={ggufPathMissing ?? undefined}
+          />
         </div>
       )}
       <div className="conversation-stream" ref={scrollRef}>

@@ -49,8 +49,22 @@ pub struct GenerateOptions {
 
 const DEFAULT_PORT: u16 = 11435;
 
-fn find_free_port() -> Option<u16> {
+/// Check 8080..8099 for an already-running server (health 200). Returns port if found.
+async fn find_already_running_port() -> Option<u16> {
     for port in 8080u16..8100u16 {
+        if runtime_health_check(port).await.ok() == Some(true) {
+            return Some(port);
+        }
+    }
+    None
+}
+
+/// Pick port: prefer 11435; if bound, use first free in 11436..11550.
+fn find_preferred_port() -> Option<u16> {
+    if TcpListener::bind(("127.0.0.1", DEFAULT_PORT)).is_ok() {
+        return Some(DEFAULT_PORT);
+    }
+    for port in (DEFAULT_PORT + 1)..=11550u16 {
         if TcpListener::bind(("127.0.0.1", port)).is_ok() {
             return Some(port);
         }
@@ -58,24 +72,19 @@ fn find_free_port() -> Option<u16> {
     None
 }
 
-#[cfg(windows)]
-fn llama_exe_rel() -> &'static str {
-    "runtime/llama/llama-server.exe"
-}
-#[cfg(not(windows))]
-fn llama_exe_rel() -> &'static str {
-    "runtime/llama/llama-server"
-}
-
-fn resolve_llama_from_tool_root(tool_root: &str) -> Result<PathBuf, String> {
-    let root = PathBuf::from(tool_root.trim().replace('\\', "/"));
-    let exe = root.join(llama_exe_rel());
-    if exe.is_file() {
-        return Ok(exe.canonicalize().map_err(|e| e.to_string())?);
+/// Resolve llama-server path under tool root; accept both .exe and no extension.
+fn resolve_llama_from_tool_root(tool_root: &std::path::Path) -> Result<PathBuf, String> {
+    let exe1 = tool_root.join("runtime/llama/llama-server.exe");
+    let exe2 = tool_root.join("runtime/llama/llama-server");
+    if exe1.is_file() {
+        return Ok(exe1.canonicalize().map_err(|e| e.to_string())?);
+    }
+    if exe2.is_file() {
+        return Ok(exe2.canonicalize().map_err(|e| e.to_string())?);
     }
     Err(format!(
-        "Could not find {}. Expected under toolRoot/runtime/llama.",
-        llama_exe_rel()
+        "Could not find runtime/llama/llama-server.exe or runtime/llama/llama-server under toolRoot. toolRoot={}",
+        tool_root.display()
     ))
 }
 
@@ -107,41 +116,40 @@ pub async fn runtime_start(
         return Err(format!("Model file not found: {}", gguf_path));
     }
 
-    let (server_path, port) = if let Some(tr) = &tool_root {
-        let server_path = resolve_llama_from_tool_root(tr)?;
-        let port = port_override.unwrap_or(DEFAULT_PORT);
-        {
-            let mut s = state.lock().map_err(|e| e.to_string())?;
-            if s.port == Some(port) {
-                if let Some(child) = s.child.as_mut() {
-                    if child.try_wait().ok().flatten().is_none() {
-                        return Ok(RuntimeStartResult { port });
-                    }
-                }
-                s.child = None;
-                s.port = None;
-            }
-        }
-        (server_path, port)
+    // Resolve tool root (UI path or global fallback).
+    let resolved_root = crate::toolroot::resolve_tool_root(tool_root.as_deref())?;
+    eprintln!(
+        "[runtime] autoStart local runtime: toolRoot={} gguf={} port_override={:?}",
+        resolved_root.display(),
+        gguf_path,
+        port_override
+    );
+    let server_path = resolve_llama_from_tool_root(&resolved_root)?;
+
+    // Port: already running on 8080..8099? Else use override or pick 11435 / 11436..11550.
+    let port = if let Some(p) = port_override {
+        p
+    } else if let Some(p) = find_already_running_port().await {
+        let mut s = state.lock().map_err(|e| e.to_string())?;
+        s.port = Some(p);
+        s.child = None;
+        return Ok(RuntimeStartResult { port: p });
     } else {
-        #[cfg(windows)]
-        let exe_name = "llama-server.exe";
-        #[cfg(not(windows))]
-        let exe_name = "llama-server";
-        let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-        let candidate = cwd.join("runtime").join("llama").join(exe_name);
-        if !candidate.is_file() {
-            return Err(format!(
-                "Could not find runtime/llama/{}. Expected under toolRoot. Use find_tool_root.",
-                exe_name
-            ));
-        }
-        let server_path = candidate.canonicalize().map_err(|e| e.to_string())?;
-        let port = port_override
-            .or_else(find_free_port)
-            .ok_or("No free port in 8080..8099.")?;
-        (server_path, port)
+        find_preferred_port().ok_or("No free port in 11435..11550.")?
     };
+
+    {
+        let mut s = state.lock().map_err(|e| e.to_string())?;
+        if s.port == Some(port) {
+            if let Some(child) = s.child.as_mut() {
+                if child.try_wait().ok().flatten().is_none() {
+                    return Ok(RuntimeStartResult { port });
+                }
+            }
+            s.child = None;
+            s.port = None;
+        }
+    }
 
     let mut args = vec![
         "--model".to_string(),

@@ -35,6 +35,8 @@ import {
   generateSnapshotData,
   writeProjectSnapshotFile,
   getSnapshotOutputPath,
+  ensureLocalRuntime,
+  pathExists,
 } from "./core";
 import type {
   FileTreeNode,
@@ -131,6 +133,7 @@ export default function App() {
   const [modelRoles, setModelRoles] = useState<ModelRolePaths | undefined>(undefined);
   const [toolRoot, setToolRoot] = useState<string | null>(null);
   const [port, setPort] = useState<number>(11435);
+  const [ggufPathMissing, setGgufPathMissing] = useState<string | null>(null);
   const [provider, setProvider] = useState<Provider>("local");
   const [localSettings, setLocalSettings] = useState<LocalModelSettings>(() => ({
     ...DEFAULT_LOCAL_SETTINGS,
@@ -182,6 +185,50 @@ export default function App() {
     if (provider !== "local" || !workspacePath) return;
     runLocalModelAutoScan();
   }, [provider, workspacePath, runLocalModelAutoScan]);
+
+  // Auto-start llama runtime when workspace is open and we have a model (non-blocking).
+  // Active GGUF = roles-first (coder) then localSettings.ggufPath; only start if path exists.
+  useEffect(() => {
+    const activeGgufPath =
+      (modelRoles?.coder ?? localSettings.ggufPath ?? "").trim();
+    if (
+      provider !== "local" ||
+      !workspacePath ||
+      !activeGgufPath
+    )
+      return;
+    let cancelled = false;
+    console.log("[App] autoStart local runtime: toolRoot=", toolRoot ?? "(null, will use global)", "gguf=", activeGgufPath, "provider=", provider, "port=", port);
+    pathExists(activeGgufPath)
+      .then((exists) => {
+        if (cancelled) return;
+        if (!exists) {
+          setGgufPathMissing(activeGgufPath);
+          console.warn("[App] auto-start skipped: GGUF file not found:", activeGgufPath);
+          return;
+        }
+        setGgufPathMissing(null);
+        ensureLocalRuntime(
+          { ...localSettings, ggufPath: activeGgufPath },
+          toolRoot,
+          port
+        )
+          .then(() => {
+            if (!cancelled) {
+              // Runtime started or already running; status panel will show it.
+            }
+          })
+          .catch((e) => {
+            if (!cancelled) console.warn("[App] auto-start runtime:", e);
+          });
+      })
+      .catch(() => {
+        if (!cancelled) setGgufPathMissing(activeGgufPath);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [provider, workspacePath, toolRoot, port, localSettings, modelRoles]);
 
   const pickGGUFFile = useCallback(async () => {
     const selected = await open({
@@ -1107,6 +1154,9 @@ export default function App() {
           provider={provider}
           onProviderChange={setProvider}
           toolRoot={toolRoot}
+          port={port}
+          activeGgufPath={(modelRoles?.coder ?? localSettings.ggufPath ?? "").trim() || null}
+          ggufPathMissing={ggufPathMissing}
           localSettings={localSettings}
           onLocalSettingsChange={setLocalSettings}
           onRescanModels={rescanModels}
