@@ -1,4 +1,6 @@
+mod developer;
 mod downloads;
+mod openai_backend;
 mod project_root;
 mod runtime;
 mod toolroot;
@@ -10,12 +12,13 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_shell::init())
         .manage(std::sync::Mutex::new(runtime::RuntimeState::default()))
+        .manage(developer::DeveloperCommandRegistry::default())
         .invoke_handler(tauri::generate_handler![
             workspace::workspace_read_dir,
             workspace::workspace_read_file,
             workspace::workspace_write_file,
+            workspace::workspace_delete_file,
             workspace::write_project_file,
             workspace::workspace_exists,
             workspace::workspace_mkdir_all,
@@ -26,6 +29,12 @@ pub fn run() {
             workspace::workspace_read_file_tail,
             workspace::workspace_search_files_by_name,
             workspace::workspace_walk_snapshot,
+            workspace::workspace_run_approved_command,
+            developer::developer_inspect_workspace,
+            developer::developer_search_repository,
+            developer::developer_run_approved_command,
+            developer::developer_cancel_command,
+            openai_backend::openai_generate,
             project_root::detect_project_root,
             toolroot::find_tool_root,
             toolroot::get_global_models_dir,

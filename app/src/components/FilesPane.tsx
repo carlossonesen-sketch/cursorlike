@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect } from "react";
 import { diffLines } from "diff";
 import type { FileTreeNode } from "../core/types";
 import type { SessionRecord } from "../core/types";
-import type { FileEditState } from "../App";
+import type { FileEditState } from "../core/chat/useChatController";
 import { SessionsPanel } from "./SessionsPanel";
 
 interface FilesPaneProps {
@@ -132,30 +132,45 @@ export function FilesPane({
     console.log("DIFF_PANEL_VISIBLE", diffPanelVisible);
   }, [diffPanelVisible]);
 
+  const [filesCollapsed, setFilesCollapsed] = useState(false);
+
   return (
     <div className="files-pane">
       <div className="files-section">
-        <div className="files-toolbar">
-          <button type="button" className="btn secondary" onClick={onPickFiles}>
-            Select files
-          </button>
-          {onRunChecks && (
-            <button type="button" className="btn secondary" onClick={onRunChecks}>
-              Run checks
-            </button>
-          )}
-        </div>
-        <div className="tree-wrap">
-          {fileTree.length === 0 ? (
-            <p className="muted">Open a workspace to see files.</p>
-          ) : (
-            walk(fileTree)
-          )}
-        </div>
-        {selectedPaths.length > 0 && (
-          <p className="muted selected-summary">
-            Selected: {selectedPaths.length} file(s)
-          </p>
+        <button
+          type="button"
+          className="files-section-header"
+          onClick={() => setFilesCollapsed((c) => !c)}
+          aria-expanded={!filesCollapsed}
+        >
+          <span>File selection</span>
+          <span className="files-section-chevron">{filesCollapsed ? "▶" : "▼"}</span>
+        </button>
+        {!filesCollapsed && (
+          <>
+            <div className="files-toolbar">
+              <button type="button" className="btn secondary" onClick={onPickFiles}>
+                Select files
+              </button>
+              {onRunChecks && (
+                <button type="button" className="btn secondary" onClick={onRunChecks}>
+                  Run checks
+                </button>
+              )}
+            </div>
+            <div className="tree-wrap">
+              {fileTree.length === 0 ? (
+                <p className="muted">Open a workspace to see files.</p>
+              ) : (
+                walk(fileTree)
+              )}
+            </div>
+            {selectedPaths.length > 0 && (
+              <p className="muted selected-summary">
+                Selected: {selectedPaths.length} file(s)
+              </p>
+            )}
+          </>
         )}
         <SessionsPanel
           sessions={sessions}

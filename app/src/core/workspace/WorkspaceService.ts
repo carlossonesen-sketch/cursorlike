@@ -44,6 +44,11 @@ export class WorkspaceService {
     return selected;
   }
 
+  async setWorkspaceRoot(path: string): Promise<void> {
+    this._root = path;
+    await this._loadGitignore();
+  }
+
   private async _loadGitignore(): Promise<void> {
     this._gitignorePatterns = [];
     if (!this._root) return;

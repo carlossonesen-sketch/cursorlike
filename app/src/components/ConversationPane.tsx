@@ -1,19 +1,38 @@
 import { useState, useRef, useEffect } from "react";
 import { ProposalCard } from "./ProposalCard";
-import { RuntimeStatusPanel } from "./RuntimeStatusPanel";
 import { ModelsPanel } from "./ModelsPanel";
+import { DiscoveryIntakeCard } from "./DiscoveryIntakeCard";
+import { AppErrorBoundary } from "./AppErrorBoundary";
 import type {
+  DiscoveryIntake,
   PlanAndPatch,
+  FounderManifest,
+  LivingBuildPlan,
+  ExistingProjectImportEvaluation,
+  BuildProgressApplySummary,
+  NewProjectFilePreview,
+  NewProjectPlanPreview,
   PlannerOutput,
+  ProjectBlueprint,
+  ProjectMemory,
   ReviewerOutput,
   AgentMode,
   ProjectSnapshot,
 } from "../core/types";
+import type { ProjectCreationState } from "../core/projectCreation/projectCreationState";
+import { buildFounderCreationSummary, currentCreationNarration } from "../core/projectCreation/projectCreationNarration";
+import { projectNameRequestMessage } from "../core/projectCreation/projectIdentity";
+import type { PhaseExecutionNarration } from "../core/phase/phaseExecutionController";
+import type { ChangeApprovalPresentation } from "../core/phase/changeApprovalController";
+import type { PhaseGatePresentation } from "../core/phase/phaseGateController";
 import type { ResumeSuggestion } from "../core";
 import type { Provider, LocalModelSettings, ModelRolePaths } from "../core";
 import { getResolvedToolRoot, getGlobalModelsDir } from "../core";
 
 export type AppState = "idle" | "patchProposed" | "patchApplied";
+const STALE_PLANNING_STEP = /\b(review and approve|preview the initial files|before anything is written|generate .*build plan|approve this plan)\b/i;
+const NEW_PROJECT_IDEA_DISPLAY_LIMIT = 1200;
+const CHAT_MESSAGE_DISPLAY_LIMIT = 4000;
 
 interface Message {
   id: string;
@@ -26,11 +45,48 @@ interface ConversationPaneProps {
   planAndPatch: PlanAndPatch | null;
   plannerOutput: PlannerOutput | null;
   reviewerOutput: ReviewerOutput | null;
+  developerMode?: boolean;
   changedFiles: string[];
   appState: AppState;
   applyInProgress: boolean;
   statusLine: string | null;
   workspaceRoot: string | null;
+  projectMemory: ProjectMemory | null;
+  livingBuildPlan: LivingBuildPlan | null;
+  founderManifest: FounderManifest | null;
+  projectCreationState: ProjectCreationState | null;
+  creationBlueprint: ProjectBlueprint | null;
+  discoveryIntake: DiscoveryIntake | null;
+  newProjectPlanPreview: NewProjectPlanPreview | null;
+  newProjectFilePreview: NewProjectFilePreview | null;
+  importEvaluation: ExistingProjectImportEvaluation | null;
+  buildProgressSummary: BuildProgressApplySummary | null;
+  canStartFoundationPhase: boolean;
+  phaseExecutionNarration: PhaseExecutionNarration | null;
+  phaseExecutionRunning: boolean;
+  changeApprovalPresentation: ChangeApprovalPresentation | null;
+  phaseGatePresentation: PhaseGatePresentation | null;
+  onStartFoundationPhase: () => void;
+  onApprovePendingChange: () => void;
+  onRejectPendingChange: () => void;
+  onExplainPendingChange: () => void;
+  onApprovePhaseAndContinue: (overrideBlockers?: boolean) => void;
+  onHoldPhase: () => void;
+  onRevisePhasePlan: () => void;
+  onGenerateNewProjectPlan: () => void;
+  onContinueDiscoveryIntake: () => void;
+  onApplyProjectName: (projectName: string) => void;
+  onApproveNewProjectPlan: () => void;
+  onReviseNewProjectPlan: () => void;
+  onCancelNewProjectPlan: () => void;
+  onBackToNewProjectPlan: () => void;
+  onCreateNewProjectFiles: () => void;
+  onApproveImportEvaluation: () => void;
+  onAnswerImportQuestions: () => void;
+  onCancelImportEvaluation: () => void;
+  onContinueBuildProgress: () => void;
+  onPauseBuildProgress: () => void;
+  onViewBuildPlan: () => void;
   resume: ResumeSuggestion | null;
   viewingSessionId: string | null;
   agentMode: AgentMode;
@@ -47,17 +103,13 @@ interface ConversationPaneProps {
   provider: Provider;
   onProviderChange: (value: Provider) => void;
   toolRoot: string | null;
-  port?: number;
-  runtimePort?: number | null;
-  activeGgufPath?: string | null;
-  ggufPathMissing?: string | null;
   localSettings: LocalModelSettings;
   onLocalSettingsChange: (value: LocalModelSettings) => void;
   onRescanModels: () => void;
   onPickGGUF: () => void;
   modelRoles?: ModelRolePaths;
   onModelRolesChange?: (roles: ModelRolePaths) => void;
-  onSendChatMessage: (prompt: string) => void;
+  onSendChatMessage: (prompt: string, messageId?: string) => void;
   onProposePatch: (prompt: string) => void;
   onRunPipeline: (prompt: string) => void;
   onKeep: () => void;
@@ -67,16 +119,59 @@ interface ConversationPaneProps {
   showingDiff: boolean;
 }
 
+function displayLongText(value: string, maxLength = NEW_PROJECT_IDEA_DISPLAY_LIMIT): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength).trim()}... (${normalized.length - maxLength} more characters hidden in the UI; full text is preserved for planning.)`;
+}
+
 export function ConversationPane({
   messages,
   planAndPatch,
   plannerOutput,
   reviewerOutput,
+  developerMode = false,
   changedFiles,
   appState,
   applyInProgress,
   statusLine,
   workspaceRoot,
+  projectMemory,
+  livingBuildPlan,
+  founderManifest,
+  projectCreationState,
+  creationBlueprint,
+  discoveryIntake,
+  newProjectPlanPreview,
+  newProjectFilePreview,
+  importEvaluation,
+  buildProgressSummary,
+  canStartFoundationPhase,
+  phaseExecutionNarration,
+  phaseExecutionRunning,
+  changeApprovalPresentation,
+  phaseGatePresentation,
+  onStartFoundationPhase,
+  onApprovePendingChange,
+  onRejectPendingChange,
+  onExplainPendingChange,
+  onApprovePhaseAndContinue,
+  onHoldPhase,
+  onRevisePhasePlan,
+  onGenerateNewProjectPlan,
+  onContinueDiscoveryIntake,
+  onApplyProjectName,
+  onApproveNewProjectPlan,
+  onReviseNewProjectPlan,
+  onCancelNewProjectPlan,
+  onBackToNewProjectPlan,
+  onCreateNewProjectFiles,
+  onApproveImportEvaluation,
+  onAnswerImportQuestions,
+  onCancelImportEvaluation,
+  onContinueBuildProgress,
+  onPauseBuildProgress,
+  onViewBuildPlan,
   resume,
   viewingSessionId,
   agentMode: _agentMode,
@@ -93,10 +188,6 @@ export function ConversationPane({
   provider,
   onProviderChange: _onProviderChange,
   toolRoot,
-  port,
-  runtimePort,
-  activeGgufPath,
-  ggufPathMissing,
   localSettings,
   onLocalSettingsChange,
   onRescanModels,
@@ -113,6 +204,7 @@ export function ConversationPane({
   showingDiff,
 }: ConversationPaneProps) {
   const [prompt, setPrompt] = useState("");
+  const [projectNameDraft, setProjectNameDraft] = useState("");
   const [knowledgeExpanded, setKnowledgeExpanded] = useState(false);
   const [expandedChunkIndices, setExpandedChunkIndices] = useState<Set<number>>(new Set());
   const [advancedExpanded, setAdvancedExpanded] = useState(false);
@@ -146,8 +238,9 @@ export function ConversationPane({
 
   const handleSendChat = () => {
     const t = prompt.trim() || "(no prompt)";
-    if (!t || !workspaceRoot) return;
-    onSendChatMessage(t);
+    if (!t) return;
+    const messageId = `u-${Date.now()}`;
+    onSendChatMessage(t, messageId);
     setPrompt("");
   };
 
@@ -173,21 +266,470 @@ export function ConversationPane({
     setExpandedChunkIndices(new Set());
   }, [lastRetrievedChunks]);
 
+  const workspaceName = workspaceRoot?.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? "Project";
+  const projectName = projectMemory?.name?.trim() || founderManifest?.projectId?.trim() || workspaceName;
+  const activeMilestone = livingBuildPlan?.milestones.find((milestone) => milestone.id === livingBuildPlan.currentMilestoneId);
+  const activeTask = activeMilestone?.tasks.find((task) => task.id === livingBuildPlan?.currentTaskId);
+  const currentMilestone = activeMilestone?.name || livingBuildPlan?.currentMilestoneId || "";
+  const rawNextRecommendedStep = livingBuildPlan?.nextRecommendedStep?.trim() || projectMemory?.resumeState.resumePrompt?.trim() || "";
+  const nextRecommendedStep = rawNextRecommendedStep && !STALE_PLANNING_STEP.test(rawNextRecommendedStep)
+    ? rawNextRecommendedStep
+    : activeTask?.title || (projectMemory?.generatedFiles?.length ? "Run build check or continue the first working interaction." : "");
+  const detectedStack = projectMemory?.techStack?.length ? projectMemory.techStack.join(", ") : "";
+  const formatCommands = (commands: { dev?: string; build?: string; test?: string; lint?: string }) =>
+    [commands.dev && `dev: ${commands.dev}`,
+      commands.build && `build: ${commands.build}`,
+      commands.test && `test: ${commands.test}`,
+      commands.lint && `lint: ${commands.lint}`]
+      .filter(Boolean)
+      .join("; ");
+
   return (
     <div className="conversation-pane">
-      {provider === "local" && (
-        <div className="runtime-status-wrap">
-          <RuntimeStatusPanel
-            workspaceRoot={workspaceRoot}
-            toolRoot={toolRoot}
-            port={port}
-            runtimePort={runtimePort}
-            activeGgufPath={activeGgufPath ?? undefined}
-            ggufPathMissing={ggufPathMissing ?? undefined}
-          />
-        </div>
-      )}
       <div className="conversation-stream" ref={scrollRef}>
+        {workspaceRoot && (
+          <div className="project-resume-card">
+            <div className="project-resume-card-header">
+              <strong>{projectName}</strong>
+              <span title={workspaceRoot}>{workspaceRoot}</span>
+            </div>
+            {(currentMilestone || nextRecommendedStep) && (
+              <div className="project-resume-card-body">
+                {detectedStack && (
+                  <p><span>Stack</span>{detectedStack}</p>
+                )}
+                {currentMilestone && (
+                  <p><span>Milestone</span>{currentMilestone}</p>
+                )}
+                {nextRecommendedStep && (
+                  <p><span>Next</span>{nextRecommendedStep}</p>
+                )}
+              </div>
+            )}
+            {canStartFoundationPhase && (
+              <div className="new-project-card-actions">
+                <button
+                  type="button"
+                  className="btn primary"
+                  onClick={onStartFoundationPhase}
+                  disabled={phaseExecutionRunning}
+                >
+                  {phaseExecutionRunning ? "Building..." : "Start Foundation Phase"}
+                </button>
+              </div>
+            )}
+            {phaseExecutionNarration && (
+              <div className="project-resume-card-body">
+                <p><span>Build status</span>{phaseExecutionNarration.founderSummary}</p>
+                {developerMode && phaseExecutionNarration.developerDetails.map((detail) => (
+                  <p key={detail}><span>Detail</span>{detail}</p>
+                ))}
+              </div>
+            )}
+            {changeApprovalPresentation?.isPending && (
+              <div className="project-resume-card-body change-approval-card">
+                <p><span>File change</span>{changeApprovalPresentation.headline}</p>
+                <p><span>What will change</span>{changeApprovalPresentation.whatWillChange}</p>
+                <p><span>Task</span>{changeApprovalPresentation.taskTitle}</p>
+                {developerMode && changeApprovalPresentation.developerDetails.map((detail) => (
+                  <p key={detail}><span>Detail</span>{detail}</p>
+                ))}
+                <div className="new-project-card-actions">
+                  <button
+                    type="button"
+                    className="btn primary"
+                    onClick={onApprovePendingChange}
+                    disabled={phaseExecutionRunning}
+                  >
+                    {phaseExecutionRunning ? "Applying..." : "Approve Change"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn secondary"
+                    onClick={onRejectPendingChange}
+                    disabled={phaseExecutionRunning}
+                  >
+                    Reject Change
+                  </button>
+                  <button
+                    type="button"
+                    className="btn secondary"
+                    onClick={onExplainPendingChange}
+                    disabled={phaseExecutionRunning}
+                  >
+                    Explain Change
+                  </button>
+                </div>
+              </div>
+            )}
+            {phaseGatePresentation?.isPending && !changeApprovalPresentation?.isPending && (
+              <div className="project-resume-card-body phase-gate-card">
+                <p><span>Phase gate</span>{phaseGatePresentation.currentPhaseName} ({phaseGatePresentation.status})</p>
+                <p><span>Completed</span>{phaseGatePresentation.completed.join(", ")}</p>
+                {phaseGatePresentation.checks.length > 0 && (
+                  <p><span>Checks</span>{phaseGatePresentation.checks.join("; ")}</p>
+                )}
+                {phaseGatePresentation.qualityGates.length > 0 && (
+                  <p><span>Quality gates</span>{phaseGatePresentation.qualityGates.map((gate) => `${gate.title}: ${gate.status}`).join("; ")}</p>
+                )}
+                {phaseGatePresentation.blockers.length > 0 ? (
+                  <p><span>Blockers</span>{phaseGatePresentation.blockers.join("; ")}</p>
+                ) : (
+                  <p><span>Blockers</span>None</p>
+                )}
+                {phaseGatePresentation.nextPhaseName && (
+                  <p><span>Next phase</span>{phaseGatePresentation.nextPhaseName}</p>
+                )}
+                <p><span>Decision</span>{phaseGatePresentation.decisionPrompt}</p>
+                <p><span>Next action</span>{phaseGatePresentation.recommendedNextAction}</p>
+                {developerMode && phaseGatePresentation.developerDetails.map((detail) => (
+                  <p key={detail}><span>Detail</span>{detail}</p>
+                ))}
+                <div className="new-project-card-actions">
+                  <button
+                    type="button"
+                    className="btn primary"
+                    onClick={() => onApprovePhaseAndContinue(false)}
+                    disabled={!phaseGatePresentation.canApprove || phaseExecutionRunning}
+                  >
+                    {phaseExecutionRunning ? "Continuing..." : "Approve Phase and Continue"}
+                  </button>
+                  {phaseGatePresentation.canApproveWithOverride && (
+                    <button
+                      type="button"
+                      className="btn secondary"
+                      onClick={() => onApprovePhaseAndContinue(true)}
+                      disabled={phaseExecutionRunning}
+                      title={phaseGatePresentation.overrideWarning ?? undefined}
+                    >
+                      Approve with Override
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="btn secondary"
+                    onClick={onHoldPhase}
+                    disabled={phaseExecutionRunning}
+                  >
+                    Hold Phase
+                  </button>
+                  <button
+                    type="button"
+                    className="btn secondary"
+                    onClick={onRevisePhasePlan}
+                    disabled={phaseExecutionRunning}
+                  >
+                    Revise Plan
+                  </button>
+                </div>
+                {phaseGatePresentation.overrideWarning && (
+                  <p><span>Override warning</span>{phaseGatePresentation.overrideWarning}</p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+        <AppErrorBoundary>
+        {projectCreationState && (
+          <div className="new-project-card">
+            <div className="new-project-card-header">
+              <strong>Create New Project</strong>
+              <span>{currentCreationNarration(projectCreationState, {
+                hasBlueprint: !!creationBlueprint,
+                hasPlanPreview: !!newProjectPlanPreview,
+                hasFilePreview: !!newProjectFilePreview,
+              })}</span>
+            </div>
+            <div className="new-project-card-body">
+              {!developerMode ? (
+                <>
+                  {(() => {
+                    const founderSummary = buildFounderCreationSummary(projectCreationState);
+                    return (
+                      <>
+                        <p><span>What NF understood</span>{founderSummary.understood}</p>
+                        <p><span>What NF will build first</span>{founderSummary.buildFirst}</p>
+                        <p><span>What comes later</span>{founderSummary.later}</p>
+                        <p><span>What I need from you</span>{founderSummary.needFromYou}</p>
+                        <p><span>Next</span>{founderSummary.nextAction}</p>
+                      </>
+                    );
+                  })()}
+                </>
+              ) : (
+                <>
+                  <p><span>Name</span>{projectCreationState.needsProjectName ? "Needs a project name" : projectCreationState.projectName}</p>
+                  <p><span>Save path</span><code>{projectCreationState.savePath}</code></p>
+                  <p><span>Planner</span>{projectCreationState.lockedPlanner}</p>
+                  <p><span>Classification</span>{projectCreationState.classification.primaryClassification}</p>
+                  <p><span>Idea</span>{displayLongText(projectCreationState.fullFounderPrompt)}</p>
+                </>
+              )}
+              {developerMode && creationBlueprint?.architectureReview.data && (
+                <p><span>Architecture Review</span>{creationBlueprint.architectureReview.data.status}</p>
+              )}
+              {developerMode && creationBlueprint?.phaseBuildPlan.data && (
+                <p><span>Phase Build Plan</span>{creationBlueprint.phaseBuildPlan.data.phases.length} phases attached</p>
+              )}
+              {newProjectPlanPreview?.fullSpecSummary && (
+                <>
+                  <p><span>Summary</span>{displayLongText(newProjectPlanPreview.fullSpecSummary.uiSummary, 1000)}</p>
+                  {developerMode && (
+                    <>
+                      <p><span>Accounts</span>{newProjectPlanPreview.fullSpecSummary.accountUserModel ?? "Needs confirmation"}</p>
+                      <p><span>Infrastructure</span>{newProjectPlanPreview.fullSpecSummary.awsDomainRequirements.length ? newProjectPlanPreview.fullSpecSummary.awsDomainRequirements.join(", ") : "Needs confirmation"}</p>
+                    </>
+                  )}
+                </>
+              )}
+              {developerMode && !newProjectPlanPreview && (
+                <p><span>Next</span>Generate MVP definition and living build plan.</p>
+              )}
+              {projectCreationState.needsProjectName && (
+                <div className="new-project-name-form">
+                  <p className="new-project-name-required"><span>Name needed</span>{projectNameRequestMessage()}</p>
+                  <label className="new-project-name-field">
+                    <span>Project name</span>
+                    <input
+                      type="text"
+                      value={projectNameDraft}
+                      onChange={(event) => setProjectNameDraft(event.target.value)}
+                      placeholder="NF Web Developer"
+                      aria-label="Project name"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="btn primary"
+                    disabled={!projectNameDraft.trim()}
+                    onClick={() => {
+                      const nextName = projectNameDraft.trim();
+                      if (!nextName) return;
+                      onApplyProjectName(nextName);
+                      setProjectNameDraft("");
+                    }}
+                  >
+                    Set project name
+                  </button>
+                </div>
+              )}
+            </div>
+            {discoveryIntake && !newProjectPlanPreview && (
+              <DiscoveryIntakeCard
+                intake={discoveryIntake}
+                developerMode={developerMode}
+                needsProjectName={projectCreationState.needsProjectName}
+                projectName={projectCreationState.projectName}
+                onContinueWithDefaults={onContinueDiscoveryIntake}
+              />
+            )}
+            {!newProjectPlanPreview && !discoveryIntake && (
+              <div className="new-project-card-actions">
+                <button type="button" className="btn primary" onClick={onGenerateNewProjectPlan}>
+                  Generate Build Plan
+                </button>
+                <button type="button" className="btn secondary" onClick={onCancelNewProjectPlan}>
+                  Cancel
+                </button>
+              </div>
+            )}
+            {!newProjectPlanPreview && discoveryIntake && (
+              <div className="new-project-card-actions">
+                <button type="button" className="btn secondary" onClick={onCancelNewProjectPlan}>
+                  Cancel
+                </button>
+              </div>
+            )}
+            {newProjectPlanPreview && (
+              <div className="new-project-plan-preview">
+                <div className="new-project-plan-status">
+                  <strong>Build Plan</strong>
+                  <span>{newProjectPlanPreview.status === "approved" ? "Approved" : newProjectPlanPreview.status === "needsRevision" ? "Needs revision" : "Draft"}</span>
+                </div>
+                <p className="new-project-mvp">{newProjectPlanPreview.mvpDefinition}</p>
+                {newProjectPlanPreview.inferredStack.length > 0 && (
+                  <p className="new-project-stack">
+                    <span>Stack</span>{newProjectPlanPreview.inferredStack.join(", ")}
+                  </p>
+                )}
+                <ol className="new-project-milestones">
+                  {newProjectPlanPreview.milestones.map((milestone) => (
+                    <li key={milestone.id}>
+                      <strong>{milestone.name}</strong>
+                      <span>{milestone.goal}</span>
+                      {milestone.tasks.length > 0 && (
+                        <ul>
+                          {milestone.tasks.map((task) => (
+                            <li key={task.id}>{task.title}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </li>
+                  ))}
+                </ol>
+                <div className="new-project-card-body">
+                  <p><span>Next</span>{newProjectPlanPreview.nextRecommendedStep}</p>
+                  {(newProjectPlanPreview.suggestedCommands.dev || newProjectPlanPreview.suggestedCommands.build || newProjectPlanPreview.suggestedCommands.test) && (
+                    <p>
+                      <span>Commands</span>
+                      {[newProjectPlanPreview.suggestedCommands.dev && `dev: ${newProjectPlanPreview.suggestedCommands.dev}`,
+                        newProjectPlanPreview.suggestedCommands.build && `build: ${newProjectPlanPreview.suggestedCommands.build}`,
+                        newProjectPlanPreview.suggestedCommands.test && `test: ${newProjectPlanPreview.suggestedCommands.test}`]
+                        .filter(Boolean).join("; ")}
+                    </p>
+                  )}
+                </div>
+                {!newProjectFilePreview && (
+                <div className="new-project-card-actions">
+                  <button type="button" className="btn primary" onClick={onApproveNewProjectPlan}>
+                    Approve plan
+                  </button>
+                  <button type="button" className="btn secondary" onClick={onReviseNewProjectPlan}>
+                    Revise plan
+                  </button>
+                  <button type="button" className="btn secondary" onClick={onCancelNewProjectPlan}>
+                    Cancel
+                  </button>
+                </div>
+                )}
+              </div>
+            )}
+            {newProjectFilePreview && (
+              <div className="new-project-file-preview">
+                <div className="new-project-plan-status">
+                  <strong>File Creation Preview</strong>
+                  <span>Not written</span>
+                </div>
+                <div className="new-project-card-body">
+                  <p><span>Target</span><code>{newProjectFilePreview.targetPath}</code></p>
+                  <p><span>Folders</span>{newProjectFilePreview.foldersToCreate.length ? newProjectFilePreview.foldersToCreate.join(", ") : "(none)"}</p>
+                  <p><span>Files</span>{newProjectFilePreview.filesToCreate.map((file) => file.path).join(", ")}</p>
+                </div>
+                <div className="starter-file-previews">
+                  {newProjectFilePreview.keyStarterFiles.map((file) => (
+                    <div key={file.path} className="starter-file-preview">
+                      <div>
+                        <strong>{file.path}</strong>
+                        <span>{file.reason}</span>
+                      </div>
+                      <pre>{file.content.slice(0, 700)}</pre>
+                    </div>
+                  ))}
+                </div>
+                <div className="new-project-card-actions">
+                  <button type="button" className="btn primary" onClick={onCreateNewProjectFiles}>
+                    Create project files
+                  </button>
+                  <button type="button" className="btn secondary" onClick={onBackToNewProjectPlan}>
+                    Back to plan
+                  </button>
+                  <button type="button" className="btn secondary" onClick={onCancelNewProjectPlan}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+        </AppErrorBoundary>
+        {importEvaluation && (
+          <div className="import-project-card">
+            <div className="import-project-card-header">
+              <strong>Import Existing Project</strong>
+              <span>Evaluation only</span>
+            </div>
+            <div className="import-project-card-body">
+              <p><span>Name</span>{importEvaluation.projectName}</p>
+              <p><span>Path</span><code>{importEvaluation.path}</code></p>
+              <p><span>Stack</span>{importEvaluation.detectedStack.length ? importEvaluation.detectedStack.join(", ") : "Needs confirmation"}</p>
+              <p><span>Type</span>{importEvaluation.likelyAppType}</p>
+              <p><span>Commands</span>{formatCommands(importEvaluation.detectedCommands) || "Needs confirmation"}</p>
+              <p><span>Docs</span>{importEvaluation.detectedDocs.length ? importEvaluation.detectedDocs.join(", ") : "None detected"}</p>
+              <p><span>Summary</span>{importEvaluation.summary}</p>
+            </div>
+            <div className="import-project-plan-preview">
+              <div className="new-project-plan-status">
+                <strong>Memory and Build Plan Draft</strong>
+                <span>Not written</span>
+              </div>
+              <p className="new-project-mvp">{importEvaluation.livingBuildPlanDraft.mvpDefinition}</p>
+              <div className="import-project-card-body">
+                <p><span>Milestone</span>{importEvaluation.livingBuildPlanDraft.milestones.find((milestone) => milestone.id === importEvaluation.livingBuildPlanDraft.currentMilestoneId)?.name ?? importEvaluation.livingBuildPlanDraft.currentMilestoneId}</p>
+                <p><span>Next</span>{importEvaluation.livingBuildPlanDraft.nextRecommendedStep}</p>
+                <p><span>Timeline</span>{importEvaluation.livingBuildPlanDraft.timelineEstimate ?? "Needs confirmation"}</p>
+                <p><span>Files</span>{importEvaluation.projectMemoryDraft.importantFiles.length ? importEvaluation.projectMemoryDraft.importantFiles.map((file) => file.path).slice(0, 8).join(", ") : "Needs confirmation"}</p>
+              </div>
+              {importEvaluation.missingInformation.length > 0 && (
+                <div className="import-project-questions">
+                  <strong>Missing information</strong>
+                  <ul>
+                    {importEvaluation.missingInformation.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                  {importEvaluation.suggestedQuestions.length > 0 && (
+                    <>
+                      <strong>Suggested questions</strong>
+                      <ul>
+                        {importEvaluation.suggestedQuestions.map((question) => (
+                          <li key={question}>{question}</li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="import-project-card-actions">
+              <button type="button" className="btn primary" onClick={onApproveImportEvaluation}>
+                Approve Import
+              </button>
+              <button type="button" className="btn secondary" onClick={onAnswerImportQuestions}>
+                Answer Questions
+              </button>
+              <button type="button" className="btn secondary" onClick={onCancelImportEvaluation}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+        {buildProgressSummary && (
+          <div className="build-progress-card">
+            <div className="build-progress-card-header">
+              <strong>Build Progress Updated</strong>
+              <span>{buildProgressSummary.completedTaskName ? "Task completed" : "Contributes toward task"}</span>
+            </div>
+            <div className="build-progress-card-body">
+              <p>
+                <span>Completed</span>
+                {buildProgressSummary.completedTaskName ?? `This contributes toward ${buildProgressSummary.contributedToward ?? "the current task"}.`}
+              </p>
+              <p>
+                <span>Files</span>
+                {buildProgressSummary.filesChanged.length ? buildProgressSummary.filesChanged.join(", ") : "(none)"}
+              </p>
+              <p>
+                <span>Progress</span>
+                {buildProgressSummary.milestoneName}: {buildProgressSummary.completedTasks} / {buildProgressSummary.totalTasks} tasks complete
+              </p>
+              <p>
+                <span>Next</span>
+                {buildProgressSummary.nextRecommendedStep}
+              </p>
+            </div>
+            <div className="build-progress-card-actions">
+              <button type="button" className="btn primary" onClick={onContinueBuildProgress}>
+                Continue
+              </button>
+              <button type="button" className="btn secondary" onClick={onPauseBuildProgress}>
+                Pause
+              </button>
+              <button type="button" className="btn secondary" onClick={onViewBuildPlan}>
+                View Build Plan
+              </button>
+            </div>
+          </div>
+        )}
         {resume && messages.length === 0 && !planAndPatch && (
           <div className="resume-block message assistant">
             <strong>Where we left off</strong>
@@ -205,23 +747,23 @@ export function ConversationPane({
         {messages.map((m) => (
           <div key={m.id} className={`message ${m.role}`}>
             <strong>{m.role === "user" ? "You" : "Assistant"}</strong>
-            <p>{m.text}</p>
+            <p>{displayLongText(m.text, CHAT_MESSAGE_DISPLAY_LIMIT)}</p>
           </div>
         ))}
-        {plannerOutput && (
+        {developerMode && plannerOutput && (
           <div className="message assistant pipeline-block">
             <strong>Planner</strong>
             <p>{plannerOutput.plan}</p>
             <p className="muted">Target files: {plannerOutput.targetFiles.join(", ") || "(none)"}</p>
           </div>
         )}
-        {planAndPatch && plannerOutput && (
+        {developerMode && planAndPatch && plannerOutput && (
           <div className="message assistant pipeline-block">
             <strong>Coder</strong>
             <p>{planAndPatch.explanation}</p>
           </div>
         )}
-        {reviewerOutput && (
+        {developerMode && reviewerOutput && (
           <div className="message assistant pipeline-block">
             <strong>Reviewer</strong>
             <p>{reviewerOutput.reviewNotes}</p>
@@ -251,7 +793,7 @@ export function ConversationPane({
           {statusLine}
         </div>
       )}
-      {lastRetrievedChunks.length > 0 && (
+      {developerMode && lastRetrievedChunks.length > 0 && (
         <div className="retrieved-knowledge">
           <button
             type="button"
@@ -311,6 +853,7 @@ export function ConversationPane({
             </>
           )}
         </div>
+        {(provider === "local" || developerMode) && (
         <div className="advanced-section">
           <button
             type="button"
@@ -318,27 +861,29 @@ export function ConversationPane({
             onClick={() => setAdvancedExpanded((v) => !v)}
             aria-expanded={advancedExpanded}
           >
-            {advancedExpanded ? "Hide Advanced" : "Advanced ▸"}
+            {advancedExpanded ? "Hide Settings" : "Settings >"}
           </button>
           {advancedExpanded && workspaceRoot && (
             <div className="advanced-content">
-              {onModelRolesChange && (
+              {developerMode && onModelRolesChange && (
                 <ModelsPanel
                   workspaceRoot={workspaceRoot}
                   modelRoles={modelRoles}
                   onModelRolesChange={onModelRolesChange}
                 />
               )}
-              {toolRoot != null && (
+              {developerMode && toolRoot != null && (
                 <div className="project-snapshot-row">
                   <span className="project-snapshot-label">toolRoot:</span>
                   <span className="project-snapshot-value" title={toolRoot}>{toolRoot}</span>
                 </div>
               )}
-              <div className="project-snapshot-row">
-                <span className="project-snapshot-label">Provider (internal):</span>
-                <span className="project-snapshot-value">{provider}</span>
-              </div>
+              {developerMode && (
+                <div className="project-snapshot-row">
+                  <span className="project-snapshot-label">Provider (internal):</span>
+                  <span className="project-snapshot-value">{provider}</span>
+                </div>
+              )}
               {provider === "local" && (
                 <div className="local-advanced-block local-settings">
                   {localSettings.ggufPath?.trim() ? (
@@ -388,6 +933,7 @@ export function ConversationPane({
                   )}
                 </div>
               )}
+              {developerMode && (
               <div className="project-snapshot-block">
                 <div className="project-snapshot-row">
                   <span className="project-snapshot-label">Project:</span>
@@ -432,9 +978,12 @@ export function ConversationPane({
                   </button>
                 </div>
               </div>
+              )}
             </div>
           )}
         </div>
+        )}
+        {developerMode && (
         <label className="knowledge-toggle">
           <input
             type="checkbox"
@@ -443,6 +992,7 @@ export function ConversationPane({
           />
           Use Knowledge Packs
         </label>
+        )}
         <div className="input-row">
           <textarea
             value={prompt}
@@ -455,13 +1005,13 @@ export function ConversationPane({
             }}
             placeholder="Describe what you want or mention a file…"
             rows={2}
-            disabled={!workspaceRoot}
+            disabled={false}
           />
         </div>
         <button
           type="button"
           className="btn primary"
-          disabled={!workspaceRoot || (provider === "local" && (!toolRoot || !localSettings.ggufPath?.trim()))}
+          disabled={provider === "local" && workspaceRoot !== null && (!toolRoot || !localSettings.ggufPath?.trim())}
           onClick={handleSendChat}
         >
           Send

@@ -1,6 +1,6 @@
-# DevAssistant Cursor Lite (app)
+# NF (Never Finished)
 
-Offline, portable desktop dev assistant. Cursor-like single-flow UI: conversation on the left, files/context and diff on the right.
+Offline, portable desktop coding assistant. Single-flow UI: conversation on the left, files/context and diff on the right.
 
 ## Setup
 
@@ -25,7 +25,7 @@ Output: `src-tauri/target/release/` (exe) and installer artifacts.
 ## Add a GGUF model
 
 1. Put your `.gguf` file in `./models` (e.g. `models/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf`).
-2. Restart the app (or use **Runtime Status** → **Start**). The app auto-detects the model and uses it for the Local (llama.cpp) provider.
+2. Restart the app (or use **Runtime Status** -> **Start**). The app auto-detects the model and uses it for the Local (llama.cpp) provider.
 
 If multiple `.gguf` files exist, the app picks the **most recently modified** one and logs a warning.
 
@@ -35,7 +35,7 @@ From repo root, `launcher/Start-Assistant.cmd` (or `.ps1`) launches the built Ta
 
 ## UI (single-flow, no tabs)
 
-- **Left pane**: Conversation stream (user + assistant messages). Inline proposal cards with **Keep (Apply)**, **Revert**, **Save / Run later**, **View Diff**. Input + “Propose Patch” at bottom. Status line (“Scanning…”, “Generating patch…”, etc.) above input when busy.
+- **Left pane**: Conversation stream (user + assistant messages). Inline proposal cards with **Keep (Apply)**, **Revert**, **Save / Run later**, **View Diff**. Input + "Propose Patch" at bottom. Status line ("Scanning...", "Generating patch...", etc.) above input when busy.
 - **Right pane**: File tree, **Select files** / **Run checks**, selected context summary. File viewer, or diff panel when **View Diff** is active (summary + full unified diff).
 
 ## State machine
@@ -61,9 +61,9 @@ Or: `npx tsx scripts/dev_snapshot_smoke.ts` from repo root. Full snapshot genera
 
 ## Verify flow
 
-1. **Open Workspace** → pick folder. Top bar shows path.
-2. **Right pane** → **Select files** and/or check files in tree for context.
-3. **Left pane** → type prompt → **Propose Patch**. Status: “Scanning…”, “Generating patch…”. Mock explanation + proposal card.
-4. **Proposal card** → **Keep (Apply)** → patch applied, “Applied.” + **Revert**. **Revert** → restores files.
-5. **Revert** (pending) → discard proposal. **Save / Run later** → store session as `pending`, no file writes.
-6. **View Diff** → diff panel on right; **Hide diff** to close.
+1. **Open Workspace** -> pick folder. Top bar shows path.
+2. **Right pane** -> **Select files** and/or check files in tree for context.
+3. **Left pane** -> type prompt -> **Propose Patch**. Status: "Scanning...", "Generating patch...". Mock explanation + proposal card.
+4. **Proposal card** -> **Keep (Apply)** -> patch applied, "Applied." + **Revert**. **Revert** -> restores files.
+5. **Revert** (pending) -> discard proposal. **Save / Run later** -> store session as `pending`, no file writes.
+6. **View Diff** -> diff panel on right; **Hide diff** to close.

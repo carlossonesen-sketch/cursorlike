@@ -76,3 +76,6 @@ tools/
 *.bak-*
 *.bak*
 
+# Local cleanup quarantine
+_quarantine/
+

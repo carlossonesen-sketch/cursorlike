@@ -1,6 +1,6 @@
 /**
  * Recommended model download URLs (config file; change without code changes).
- * Used by "Download recommended models" – if download fails, show manual steps.
+ * Used by "Download recommended models" - if download fails, show manual steps.
  */
 
 export interface RecommendedModelSpec {
@@ -12,7 +12,7 @@ export interface RecommendedModelSpec {
   filename: string;
 }
 
-/** Mid-size strategy: coder 14B, general 7B–14B, small embedding/reranker. */
+/** Mid-size strategy: coder 14B, general 7B-14B, small embedding/reranker. */
 export const RECOMMENDED_MODELS: RecommendedModelSpec[] = [
   {
     role: "coder",

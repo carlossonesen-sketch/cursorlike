@@ -47,6 +47,10 @@ function buildCoderPrompt(ctx: ModelContext): string {
     parts.push("");
     parts.push("Project context: " + ctx.manifestSummary.slice(0, 800));
   }
+  if (ctx.projectMemorySummary) {
+    parts.push("");
+    parts.push(ctx.projectMemorySummary.slice(0, 1200));
+  }
   if (ctx.knowledgeChunks?.length) {
     parts.push("");
     parts.push("Relevant knowledge:");
@@ -61,12 +65,16 @@ function buildCoderPrompt(ctx: ModelContext): string {
   return parts.join("\n");
 }
 
+/** Normal chat: output the result only. Examples tell the model what "output" means. */
 const CHAT_SYSTEM_PROMPT =
-  "You are a helpful dev assistant. Answer the user's question concisely. Do NOT output a diff, unified patch, or code changes. Just answer normally in plain text.";
+  "Output only the result. Example: user says 'say ok' → you reply: ok. User says 'count from 1 to 5' → you reply: 1 2 3 4 5. No explanation or extra text.";
+
+/** file_read / explain: one sentence if requested, no extra commentary. */
+const FILE_READ_SYSTEM_PROMPT =
+  "You are a command-following assistant. For file or content questions answer in one sentence when that is requested. Do not add extra commentary.";
 
 function buildChatUserPrompt(ctx: ModelContext): string {
-  const parts: string[] = [];
-  parts.push("User: " + ctx.prompt);
+  const parts: string[] = [ctx.prompt];
   if (ctx.selectedFiles.length) {
     parts.push("");
     parts.push("Context files: " + ctx.selectedFiles.map((f) => f.path).join(", "));
@@ -80,6 +88,10 @@ function buildChatUserPrompt(ctx: ModelContext): string {
     parts.push("");
     parts.push("Project: " + ctx.manifestSummary.slice(0, 500));
   }
+  if (ctx.projectMemorySummary) {
+    parts.push("");
+    parts.push(ctx.projectMemorySummary.slice(0, 1200));
+  }
   if (ctx.knowledgeChunks?.length) {
     parts.push("");
     parts.push("Relevant knowledge:");
@@ -87,9 +99,12 @@ function buildChatUserPrompt(ctx: ModelContext): string {
       parts.push("[" + k.title + "] " + k.chunkText.slice(0, 400));
     }
   }
-  parts.push("");
-  parts.push("Answer (plain text only, no diff):");
   return parts.join("\n");
+}
+
+/** Used only for file_read/explain. Returns [system, user] from existing builders. */
+function getMessagesForRequest(ctx: ModelContext): { system: string; user: string } {
+  return { system: FILE_READ_SYSTEM_PROMPT, user: buildChatUserPrompt(ctx) };
 }
 
 export class LocalModelProvider implements IModelProvider {
@@ -132,18 +147,28 @@ export class LocalModelProvider implements IModelProvider {
     const port = await ensureLocalRuntime(settings, this.getToolRoot(), this.getPort());
     console.log("[gen] ensureRuntime done", Date.now() - t0);
     const baseUrl = getRuntimeBaseUrl(port);
-    const userPrompt = buildChatUserPrompt(ctx);
     const opts = this.getGenerateOptions();
     const maxTokens = Math.min(512, opts.max_tokens ?? settings.max_tokens);
     const temperature = Math.max(0.2, Math.min(0.7, opts.temperature ?? settings.temperature));
     const chatOpts: ChatOptions = { max_tokens: maxTokens, temperature };
+
+    let systemPrompt: string;
+    let userPrompt: string;
+    if (ctx.includeFileProjectContext) {
+      const built = getMessagesForRequest(ctx);
+      systemPrompt = built.system;
+      userPrompt = built.user;
+    } else {
+      systemPrompt = CHAT_SYSTEM_PROMPT;
+      userPrompt = ctx.prompt;
+    }
 
     if (options?.onChunk) {
       try {
         console.log("[runtime] request (stream)", "POST", baseUrl + "/v1/chat/completions");
         const t1 = Date.now();
         const raw = await runtimeChatStream(
-          CHAT_SYSTEM_PROMPT,
+          systemPrompt,
           userPrompt,
           chatOpts,
           { onChunk: options.onChunk }
@@ -158,7 +183,7 @@ export class LocalModelProvider implements IModelProvider {
     try {
       console.log("[runtime] request", "POST", baseUrl + "/v1/chat/completions");
       const t1 = Date.now();
-      const raw = await runtimeChat(CHAT_SYSTEM_PROMPT, userPrompt, chatOpts);
+      const raw = await runtimeChat(systemPrompt, userPrompt, chatOpts);
       console.log("[gen] runtimeChat done", Date.now() - t1);
       return (raw || "").trim() || "No response.";
     } catch (e) {

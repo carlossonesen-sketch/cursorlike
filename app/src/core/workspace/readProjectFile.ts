@@ -1,4 +1,4 @@
-/**
+﻿/**
  * File-intent helper: detect "show me the readme" style prompts and read project files.
  * Read-only, project root only; no shell, execution, or edits.
  */
@@ -61,10 +61,21 @@ function normPath(s: string): string | null {
   return p || null;
 }
 
-/** Candidate is valid only if path-like, has extension, or is allowed bare; never a verb. */
+/** Candidate is valid only if path-like, has extension, or is allowed bare; never a verb or project directory. */
+function isLikelyProjectDirectory(raw: string): boolean {
+  const n = normPath(raw);
+  if (!n) return false;
+  const lower = n.toLowerCase();
+  if (/^[a-z]:[\\/]/.test(lower)) return true;
+  if (/(?:^|\/)(?:nf-projects|projects)(?:\/|$)/.test(lower) && !HAS_EXTENSION.test(n)) return true;
+  const segments = lower.split("/").filter(Boolean);
+  return !HAS_EXTENSION.test(n) && segments.length >= 2 && !segments.some((segment) => segment.includes("."));
+}
+
 function isValidFileCandidate(raw: string): boolean {
   const n = normPath(raw);
   if (!n) return false;
+  if (isLikelyProjectDirectory(n)) return false;
   const lower = n.toLowerCase();
   if (FILE_VERBS.has(lower)) return false;
   if (n.includes("/") || n.includes("\\")) return true;
@@ -167,12 +178,100 @@ function normalizePath(hint: string): string | null {
   return p || null;
 }
 
-function isExactMatch(relPath: string, hint: string): boolean {
-  const name = (relPath.split(/[/\\]/).pop() ?? "").toLowerCase();
-  const stem = (name.replace(/\.[^.]+$/, "") || name).toLowerCase();
-  const hintLower = hint.toLowerCase().trim();
-  const hintStem = (hintLower.replace(/\.[^.]+$/, "") || hintLower).toLowerCase();
-  return name === hintLower || stem === hintStem || name === hintStem;
+function basename(path: string): string {
+  return path.replace(/\\/g, "/").split("/").pop() ?? path;
+}
+
+function stem(name: string): string {
+  return name.replace(/\.[^.]+$/, "") || name;
+}
+
+function dedupePaths(paths: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const path of paths) {
+    const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "");
+    const key = normalized.toLowerCase();
+    if (!normalized || seen.has(key)) continue;
+    seen.add(key);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+
+  const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  const curr = Array.from({ length: b.length + 1 }, () => 0);
+  for (let i = 1; i <= a.length; i += 1) {
+    curr[0] = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(
+        curr[j - 1] + 1,
+        prev[j] + 1,
+        prev[j - 1] + cost
+      );
+    }
+    for (let j = 0; j <= b.length; j += 1) prev[j] = curr[j];
+  }
+  return prev[b.length];
+}
+
+function typoThreshold(value: string): number {
+  if (value.length <= 4) return 1;
+  if (value.length <= 8) return 2;
+  return 3;
+}
+
+function sortByPreference(paths: string[]): string[] {
+  return [...paths].sort((a, b) => {
+    const aSegments = a.split("/").length;
+    const bSegments = b.split("/").length;
+    return aSegments - bSegments || a.length - b.length || a.localeCompare(b);
+  });
+}
+
+function pickUniqueByTier(paths: string[], hint: string): string | string[] | null {
+  const normalizedHint = hint.replace(/\\/g, "/").replace(/^\/+/, "");
+  const hintLower = normalizedHint.toLowerCase();
+  const hintName = basename(normalizedHint);
+  const hintNameLower = hintName.toLowerCase();
+  const hintStemLower = stem(hintNameLower);
+
+  const tiers: Array<(path: string) => boolean> = [
+    // 1. Exact path.
+    (path) => path === normalizedHint,
+    // 2. Exact filename.
+    (path) => basename(path) === hintName,
+    // 3. Case-insensitive path or filename match.
+    (path) => path.toLowerCase() === hintLower || basename(path).toLowerCase() === hintNameLower,
+    // 4. Partial path match.
+    (path) => path.toLowerCase().includes(hintLower),
+    // 5. Fuzzy filename/stem match.
+    (path) => {
+      const name = basename(path).toLowerCase();
+      const fileStem = stem(name);
+      return name.includes(hintNameLower) || fileStem.includes(hintStemLower) || hintNameLower.includes(fileStem);
+    },
+    // 6. Levenshtein distance for minor typos.
+    (path) => {
+      const name = basename(path).toLowerCase();
+      const fileStem = stem(name);
+      const threshold = typoThreshold(hintStemLower);
+      return levenshtein(name, hintNameLower) <= threshold || levenshtein(fileStem, hintStemLower) <= threshold;
+    },
+  ];
+
+  for (const tier of tiers) {
+    const matches = sortByPreference(paths.filter(tier));
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) return matches;
+  }
+  return null;
 }
 
 export type ReadProjectFileResult =
@@ -222,20 +321,30 @@ export async function readProjectFile(
 
   if (searchFiles) {
     try {
-      const list = await searchFiles(workspaceRoot, hint);
+      const searchTerms = [
+        normalized,
+        basename(normalized),
+        stem(basename(normalized)),
+        hint,
+      ].filter((term) => term.trim().length > 0);
+      const list = dedupePaths(
+        (
+          await Promise.all(
+            [...new Set(searchTerms)].map((term) => searchFiles(workspaceRoot, term))
+          )
+        ).flat()
+      );
       if (list.length === 0) {
         return { path: normalized.includes("/") ? normalized : hint, error: "not found" };
       }
-      if (list.length === 1) {
-        const content = await readFile(list[0]);
-        return { path: list[0], content };
+      const resolved = pickUniqueByTier(list, normalized);
+      if (typeof resolved === "string") {
+        const content = await readFile(resolved);
+        return { path: resolved, content };
       }
-      const exactMatches = list.filter((p) => isExactMatch(p, hint));
-      if (exactMatches.length === 1) {
-        const content = await readFile(exactMatches[0]);
-        return { path: exactMatches[0], content };
+      if (Array.isArray(resolved)) {
+        return { path: normalized, error: "multiple", candidates: resolved };
       }
-      return { path: hint, error: "multiple", candidates: list };
     } catch {
       /* fall through to not found */
     }
@@ -244,3 +353,4 @@ export async function readProjectFile(
   const displayName = normalized.includes("/") ? normalized : hint;
   return { path: displayName, error: "not found" };
 }
+

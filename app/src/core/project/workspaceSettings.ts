@@ -10,6 +10,8 @@ const SETTINGS_PATH = ".devassistant/settings.json";
 const DEFAULT_SETTINGS: WorkspaceSettings = {
   autoPacksEnabled: true,
   enabledPacks: [],
+  provider: "local",
+  openaiModel: "gpt-5.4",
 };
 
 export async function readWorkspaceSettings(
@@ -31,6 +33,10 @@ export async function readWorkspaceSettings(
     return {
       autoPacksEnabled: data.autoPacksEnabled ?? DEFAULT_SETTINGS.autoPacksEnabled,
       enabledPacks: Array.isArray(data.enabledPacks) ? data.enabledPacks : DEFAULT_SETTINGS.enabledPacks,
+      provider: data.provider === "openai" ? "openai" : DEFAULT_SETTINGS.provider,
+      openaiModel: typeof data.openaiModel === "string" && data.openaiModel.trim()
+        ? data.openaiModel.trim()
+        : DEFAULT_SETTINGS.openaiModel,
       modelPath: typeof data.modelPath === "string" && data.modelPath.trim() ? data.modelPath.trim() : undefined,
       port: typeof data.port === "number" && data.port > 0 ? data.port : undefined,
       modelRoles,
@@ -54,3 +60,6 @@ export async function writeWorkspaceSettings(
     content: JSON.stringify(settings, null, 2),
   });
 }
+
+
+

@@ -67,6 +67,36 @@ export type { ApplyResult, FileSnapshot } from "./patch/PatchEngine";
 export { MemoryStore } from "./memory/MemoryStore";
 export { resumeSuggestion } from "./memory/resumeSuggestion";
 export type { ResumeSuggestion } from "./memory/resumeSuggestion";
+export { createDefaultGlobalMemory, readGlobalMemory, writeGlobalMemory } from "./memory/globalMemoryStore";
+export { createDefaultProjectMemory, readProjectMemory, writeProjectMemory } from "./memory/projectMemoryStore";
+export { createDefaultLivingBuildPlan, readLivingBuildPlan, writeLivingBuildPlan } from "./memory/buildPlanStore";
+export { createDefaultFounderManifest, readFounderManifest, writeFounderManifest } from "./memory/founderManifestStore";
+export { appendActionLogEntry, readActionLog } from "./memory/actionLogStore";
+export {
+  attachControlPreferences,
+  canAttemptRepairAutomatically,
+  canRunPhaseAutomatically,
+  canRunQualityChecksAutomatically,
+  controlPreferencesFromBlueprint,
+  createControlPreferences,
+  developerModeControlPreferences,
+  evaluateControlPolicy,
+  founderModeControlPreferences,
+  patchesRequireApproval,
+} from "./control/controlLevel";
+export type { ControlledAction, ControlPolicyDecision, ControlPolicyInput } from "./control/controlLevel";
+export { createPhaseGateSummary } from "./control/founderPhaseGate";
+export type { DeveloperPhaseGateSummary, FounderPhaseGateSummary, PhaseGateSummary, PhaseGateSummaryInput } from "./control/founderPhaseGate";
+export {
+  shouldRequireApprovalForRiskyDeveloperAction,
+  shouldShowAuditControls,
+  shouldShowBuildControls,
+  shouldShowDeveloperTools,
+  shouldShowManualCommandControls,
+  shouldShowPatchControls,
+  shouldShowRawTaskState,
+} from "./control/developerModeTools";
+export type { DeveloperToolVisibilityInput, RiskyActionInput } from "./control/developerModeTools";
 export { KnowledgeStore } from "./knowledge/KnowledgeStore";
 export type { ModelRolePaths } from "./types";
 export {

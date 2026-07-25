@@ -6,7 +6,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-export type Provider = "mock" | "local";
+export type Provider = "mock" | "local" | "openai";
 
 const DEFAULT_PORT = 11435;
 
@@ -233,3 +233,6 @@ export async function ensureLocalRuntime(
   }, usePort, null);
   return result.port;
 }
+
+
+

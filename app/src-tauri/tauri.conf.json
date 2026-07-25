@@ -1,18 +1,18 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "devassistant-cursor-light",
+  "productName": "NF",
   "version": "0.1.0",
-  "identifier": "com.devassistant.cursorlite",
+  "identifier": "com.neverfinished.nf",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://localhost:1430",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
   "app": {
     "windows": [
       {
-        "title": "devassistant-cursor-light",
+        "title": "NF - Never Finished",
         "width": 800,
         "height": 600
       }
@@ -33,3 +33,4 @@
     ]
   }
 }
+

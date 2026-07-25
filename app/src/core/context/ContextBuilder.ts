@@ -3,13 +3,14 @@
  * Optionally include retrieved knowledge chunks (role-based limits).
  */
 
-import type { ModelContext, ProjectManifest, KnowledgeChunkRef, ProjectSnapshot } from "../types";
+import type { FounderManifest, LivingBuildPlan, ModelContext, ProjectManifest, KnowledgeChunkRef, ProjectMemory, ProjectSnapshot } from "../types";
 import type { WorkspaceService } from "../workspace/WorkspaceService";
 import type { KnowledgeStore } from "../knowledge/KnowledgeStore";
 
 const KNOWLEDGE_LIMIT_PLANNER = 5;
 const KNOWLEDGE_LIMIT_CODER = 8;
 const KNOWLEDGE_LIMIT_REVIEWER = 5;
+const STALE_PLANNING_STEP = /\b(review and approve|preview the initial files|before anything is written|generate .*build plan|approve this plan)\b/i;
 
 export type AgentRoleForKnowledge = "planner" | "coder" | "reviewer";
 
@@ -20,6 +21,10 @@ export interface BuildOptions {
   agentRole?: AgentRoleForKnowledge;
   /** When set, a PROJECT SNAPSHOT section is added to context for all agents. */
   projectSnapshot?: ProjectSnapshot | null;
+  projectMemory?: ProjectMemory | null;
+  livingBuildPlan?: LivingBuildPlan | null;
+  founderManifest?: FounderManifest | null;
+  includeFileProjectContext?: boolean;
   /** Packs to filter knowledge retrieval (chunk tags). */
   enabledPacks?: string[];
 }
@@ -40,7 +45,7 @@ export class ContextBuilder {
       Array.isArray(suggestedPathsOrOptions)
         ? { suggestedPaths: suggestedPathsOrOptions }
         : suggestedPathsOrOptions ?? {};
-    const { suggestedPaths, useKnowledge, knowledgeStore, agentRole, projectSnapshot, enabledPacks } = options;
+    const { suggestedPaths, useKnowledge, knowledgeStore, agentRole, projectSnapshot, projectMemory, livingBuildPlan, founderManifest, includeFileProjectContext, enabledPacks } = options;
 
     const read = async (path: string) => {
       try {
@@ -90,6 +95,30 @@ export class ContextBuilder {
         : snapshotLines;
     }
 
+    let projectMemorySummary: string | undefined;
+    if (projectMemory || livingBuildPlan || founderManifest) {
+      const activeMilestone = livingBuildPlan?.milestones.find((milestone) => milestone.id === livingBuildPlan.currentMilestoneId);
+      const activeTask = activeMilestone?.tasks.find((task) => task.id === livingBuildPlan?.currentTaskId);
+      const recentWork = projectMemory?.recentWork?.[0];
+      const rawNextStep = livingBuildPlan?.nextRecommendedStep || projectMemory?.resumeState?.resumePrompt || "";
+      const nextStep = rawNextStep && !STALE_PLANNING_STEP.test(rawNextStep)
+        ? rawNextStep
+        : activeTask?.title || "Run build check or continue the first working interaction.";
+      projectMemorySummary = [
+        "=== NF PROJECT MEMORY ===",
+        `Project: ${projectMemory?.name || founderManifest?.projectId || "(unnamed)"}`,
+        `Path: ${projectMemory?.path || this.workspace.root || "(unknown)"}`,
+        `Summary: ${projectMemory?.summary || "(none)"}`,
+        `Lifecycle: ${projectMemory?.lifecycleStage || "(unknown)"}`,
+        `Current milestone: ${activeMilestone?.name || livingBuildPlan?.currentMilestoneId || "(none)"}`,
+        `Current task: ${activeTask?.title || livingBuildPlan?.currentTaskId || "(none)"}`,
+        `Next recommended step: ${nextStep}`,
+        `Progress: ${livingBuildPlan?.progressSummary || "(none)"}`,
+        recentWork ? `Last completed work: ${recentWork.completed}` : "Last completed work: (none)",
+        founderManifest?.mvpDefinition ? `MVP definition: ${founderManifest.mvpDefinition}` : "",
+      ].filter(Boolean).join("\n");
+    }
+
     let knowledgeChunks: KnowledgeChunkRef[] | undefined;
     if (useKnowledge && knowledgeStore && enabledPacks && enabledPacks.length > 0) {
       const limit =
@@ -115,7 +144,9 @@ export class ContextBuilder {
       selectedFiles: selected,
       suggestedFiles: suggested?.length ? suggested : undefined,
       manifestSummary,
+      projectMemorySummary,
       knowledgeChunks: knowledgeChunks?.length ? knowledgeChunks : undefined,
+      includeFileProjectContext,
     };
   }
 }

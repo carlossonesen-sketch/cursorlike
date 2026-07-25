@@ -5,9 +5,12 @@
 import * as diff from "diff";
 import { invoke } from "@tauri-apps/api/core";
 
+type TauriInvoke = typeof invoke;
+
 export interface FileSnapshot {
   path: string;
   content: string;
+  existed?: boolean;
 }
 
 export interface ApplyResult {
@@ -25,31 +28,68 @@ function validatePath(_root: string, path: string): boolean {
 export function pathsFromPatch(patch: string): string[] {
   const out = new Set<string>();
   for (const line of patch.split(/\r?\n/)) {
-    const m = /^[-+]{3}\s+[ab]\/(.+)$/.exec(line);
-    if (m) out.add(m[1].replace(/\\/g, "/"));
+    const m = /^[-+]{3}\s+(?:[ab]\/(.+)|\/dev\/null)$/.exec(line);
+    if (m?.[1]) out.add(m[1].replace(/\\/g, "/"));
   }
   return [...out];
 }
 
+export function selectPatchFiles(patch: string, selectedPaths: string[]): string {
+  const selected = new Set(selectedPaths.map((path) => path.replace(/\\/g, "/")));
+  return [...patchChunksByFile(patch)]
+    .filter(([path]) => selected.has(path))
+    .map(([, chunk]) => chunk)
+    .join("\n");
+}
+
 function patchChunksByFile(patch: string): Map<string, string> {
   const map = new Map<string, string>();
-  const chunks = patch.split(/\r?\n(?=--- [ab]\/)/);
+  const chunks = patch.split(/\r?\n(?=---\s+(?:[ab]\/|\/dev\/null))/);
   for (const chunk of chunks) {
-    const m = /^--- [ab]\/(.+)\r?\n\+\+\+ [ab]\/(.+)\r?\n([\s\S]*)/.exec(chunk.trim());
+    const trimmed = chunk.trim();
+    const m = /---\s+(?:a\/(.+)|\/dev\/null)\r?\n\+\+\+\s+(?:b\/(.+)|\/dev\/null)\r?\n([\s\S]*)/.exec(trimmed);
     if (!m) continue;
-    map.set(m[1].replace(/\\/g, "/"), chunk.trim());
+    const path = (m[2] ?? m[1])?.replace(/\\/g, "/");
+    if (path) map.set(path, trimmed.slice(m.index));
   }
   if (map.size === 0 && patch.trim()) {
-    const m = /^--- [ab]\/(.+)\r?\n\+\+\+ [ab]\/(.+)\r?\n([\s\S]*)/.exec(patch);
-    if (m) map.set(m[1].replace(/\\/g, "/"), patch.trim());
+    const m = /---\s+(?:a\/(.+)|\/dev\/null)\r?\n\+\+\+\s+(?:b\/(.+)|\/dev\/null)\r?\n([\s\S]*)/.exec(patch);
+    const path = (m?.[2] ?? m?.[1])?.replace(/\\/g, "/");
+    if (path && m) map.set(path, patch.trim().slice(m.index));
   }
   return map;
+}
+
+function deletedPathsFromPatch(patch: string): Set<string> {
+  const paths = new Set<string>();
+  const pattern = /---\s+a\/(.+)\r?\n\+\+\+\s+\/dev\/null(?:\r?\n|$)/g;
+  for (const match of patch.matchAll(pattern)) {
+    if (match[1]) paths.add(match[1].replace(/\\/g, "/"));
+  }
+  return paths;
+}
+
+import { validatePatchContent } from "./patchDuplicateGuard";
+
+function validateStructuredContent(path: string, content: string): string | null {
+  if (/\.json$/i.test(path)) {
+    try {
+      const parsed = JSON.parse(content);
+      if (parsed == null || Array.isArray(parsed) || typeof parsed !== "object") {
+        return "JSON root value must be an object";
+      }
+    } catch (e) {
+      return `invalid JSON: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+  return null;
 }
 
 export class PatchEngine {
   constructor(
     private workspaceRoot: string,
-    private getFileContent: (relPath: string) => Promise<string>
+    private getFileContent: (relPath: string) => Promise<string>,
+    private invokeCommand: TauriInvoke = invoke
   ) {}
 
   validatePatch(patch: string): { valid: boolean; paths: string[]; error?: string } {
@@ -91,15 +131,51 @@ export class PatchEngine {
     const applied: string[] = [];
     const failed: { path: string; error: string }[] = [];
     const beforeSnapshots: FileSnapshot[] = [];
+    const expectedPaths = pathsFromPatch(patch);
+    const deletedPaths = deletedPathsFromPatch(patch);
+
+    for (const path of expectedPaths) {
+      if (!previewMap.has(path)) {
+        failed.push({ path, error: "patch did not produce a writable file preview" });
+      }
+    }
 
     for (const [path, { old: oldContent, new: content }] of previewMap) {
-      beforeSnapshots.push({ path, content: oldContent });
+      let existed = true;
       try {
-        await invoke("workspace_write_file", {
-          workspaceRoot: this.workspaceRoot,
-          path,
-          content,
-        });
+        await this.getFileContent(path);
+      } catch {
+        existed = false;
+      }
+      beforeSnapshots.push({ path, content: oldContent, existed });
+      try {
+        const validationError =
+          validateStructuredContent(path, content) ?? validatePatchContent(path, oldContent, content);
+        if (validationError) {
+          throw new Error(validationError);
+        }
+        if (deletedPaths.has(path)) {
+          await this.invokeCommand("workspace_delete_file", {
+            workspaceRoot: this.workspaceRoot,
+            path,
+          });
+          try {
+            await this.getFileContent(path);
+            throw new Error("disk verification failed after delete");
+          } catch (error) {
+            if (String(error).includes("disk verification failed")) throw error;
+          }
+        } else {
+          await this.invokeCommand("workspace_write_file", {
+            workspaceRoot: this.workspaceRoot,
+            path,
+            content,
+          });
+          const diskContent = await this.getFileContent(path);
+          if (diskContent !== content) {
+            throw new Error("disk verification failed after write");
+          }
+        }
         applied.push(path);
       } catch (e) {
         failed.push({ path, error: String(e) });
@@ -111,17 +187,24 @@ export class PatchEngine {
   async revert(snapshots: FileSnapshot[]): Promise<ApplyResult> {
     const applied: string[] = [];
     const failed: { path: string; error: string }[] = [];
-    for (const { path, content } of snapshots) {
+    for (const { path, content, existed } of snapshots) {
       if (!validatePath(this.workspaceRoot, path)) {
         failed.push({ path, error: "path escapes workspace" });
         continue;
       }
       try {
-        await invoke("workspace_write_file", {
-          workspaceRoot: this.workspaceRoot,
-          path,
-          content,
-        });
+        if (existed === false) {
+          await this.invokeCommand("workspace_delete_file", {
+            workspaceRoot: this.workspaceRoot,
+            path,
+          });
+        } else {
+          await this.invokeCommand("workspace_write_file", {
+            workspaceRoot: this.workspaceRoot,
+            path,
+            content,
+          });
+        }
         applied.push(path);
       } catch (e) {
         failed.push({ path, error: String(e) });

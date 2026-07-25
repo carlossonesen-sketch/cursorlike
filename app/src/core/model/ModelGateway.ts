@@ -15,6 +15,14 @@ export interface IModelProvider {
   generateChatResponse(ctx: ModelContext, options?: ChatResponseOptions): Promise<string>;
 }
 
+export interface ModelProviderInfo {
+  kind: "local" | "openai" | "mock";
+  label: string;
+  isReal: boolean;
+  available: boolean;
+  reason?: string;
+}
+
 /** Build a minimal unified diff that prepends lines to oldStr. */
 function buildPrependPatch(path: string, oldStr: string, prepend: string): string {
   const a = "a/" + path;
@@ -41,7 +49,8 @@ export class MockModelProvider implements IModelProvider {
     const files = ctx.selectedFiles.length
       ? ` Context files: ${ctx.selectedFiles.map((f) => f.path).join(", ")}.`
       : "";
-    return `[MOCK] You asked: "${q}${q.length >= 120 ? "…" : ""}".${files} I'm a dev assistant. Ask questions here; use "Propose Patch" to get code changes (explanation + diff). No diff in chat.`;
+    const memory = ctx.projectMemorySummary ? " Project memory is loaded." : "";
+    return `[MOCK] You asked: "${q}${q.length >= 120 ? "..." : ""}".${files}${memory} I'm NF. I use the opened workspace as context; ask for a code change and I will identify files and propose a patch.`;
   }
 
   async generatePlanAndPatch(ctx: ModelContext): Promise<PlanAndPatch> {
@@ -50,8 +59,8 @@ export class MockModelProvider implements IModelProvider {
     const knowledgeNote =
       ctx.knowledgeChunks?.length ? ` + ${ctx.knowledgeChunks.length} knowledge chunk(s)` : "";
     const explanation = plan
-      ? `[MOCK Coder] Plan: "${plan.slice(0, 80)}…". Context files: ${files}${knowledgeNote}. Implemented per plan; plug in local model (Ollama/llama.cpp) later.`
-      : `[MOCK] You asked: "${ctx.prompt.slice(0, 100)}…". Context files: ${files}${knowledgeNote}. This is a placeholder; plug in a local model (Ollama/llama.cpp) later.`;
+      ? `[MOCK Coder] Plan: "${plan.slice(0, 80)}...". Context files: ${files}${knowledgeNote}. Implemented per plan; plug in local model (Ollama/llama.cpp) later.`
+      : `[MOCK] You asked: "${ctx.prompt.slice(0, 100)}...". Context files: ${files}${knowledgeNote}. This is a placeholder; plug in a local model (Ollama/llama.cpp) later.`;
     const patch = this.mockPatch(ctx);
     return { explanation, patch };
   }
@@ -61,22 +70,34 @@ export class MockModelProvider implements IModelProvider {
     const first = ctx.selectedFiles.find((f) => paths.includes(f.path)) ?? ctx.selectedFiles[0];
     const path = first ? first.path : paths[0] ?? "README.md";
     const oldStr = first?.content ?? "";
-    const prepend = "// DevAssistant mock edit – replace with real model output.\n\n";
+    const prepend = "// NF mock edit - replace with real model output.\n\n";
     return buildPrependPatch(path, oldStr, prepend);
   }
 }
 
-// TODO: LocalModelProvider (Ollama / llama.cpp) — same interface, real model calls.
+// TODO: LocalModelProvider (Ollama / llama.cpp) - same interface, real model calls.
 // export class LocalModelProvider implements IModelProvider { ... }
 
 let defaultProvider: IModelProvider = new MockModelProvider();
+let defaultProviderInfo: ModelProviderInfo = {
+  kind: "mock",
+  label: "Mock (development only)",
+  isReal: false,
+  available: true,
+  reason: "Mock responses cannot be applied in Developer Mode.",
+};
 
-export function setModelProvider(p: IModelProvider): void {
+export function setModelProvider(p: IModelProvider, info?: ModelProviderInfo): void {
   defaultProvider = p;
+  defaultProviderInfo = info ?? defaultProviderInfo;
 }
 
 export function getModelProvider(): IModelProvider {
   return defaultProvider;
+}
+
+export function getModelProviderInfo(): ModelProviderInfo {
+  return { ...defaultProviderInfo };
 }
 
 export async function generatePlanAndPatch(ctx: ModelContext): Promise<PlanAndPatch> {

@@ -7,6 +7,7 @@ import { classifyFileActionIntent } from "./fileActionIntent";
 export type RouteDecision =
   | { action: "file_open"; targetPath: string }
   | { action: "file_edit"; targetPath: string; instructions: string }
+  | { action: "file_read"; targetPath: string; instructions: string }
   | { action: "chat" };
 
 /**
@@ -26,6 +27,14 @@ export function routeUserMessage(message: string): RouteDecision {
   if (intent.intentType === "file_edit") {
     return {
       action: "file_edit",
+      targetPath: primary.path,
+      instructions: intent.instructions,
+    };
+  }
+
+  if (intent.intentType === "file_read") {
+    return {
+      action: "file_read",
       targetPath: primary.path,
       instructions: intent.instructions,
     };

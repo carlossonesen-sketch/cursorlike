@@ -1,6 +1,6 @@
-﻿# DevAssistantCursorLite
+# NF
 
-A local-first AI coding assistant inspired by tools like Cursor, designed to analyze code, suggest edits, and assist with development workflows.
+**Never Finished** is a local-first AI coding assistant designed to analyze code, suggest edits, and assist with development workflows.
 
 ## Key Features
 - Project-aware file reading and navigation

@@ -18,6 +18,7 @@ interface RuntimeStatusPanelProps {
   runtimePort?: number | null;
   activeGgufPath?: string | null;
   ggufPathMissing?: string | null;
+  developerMode?: boolean;
 }
 
 function CopyablePath({ label, path }: { label: string; path: string }) {
@@ -37,6 +38,7 @@ export function RuntimeStatusPanel({
   runtimePort,
   activeGgufPath,
   ggufPathMissing,
+  developerMode = false,
 }: RuntimeStatusPanelProps) {
   const [minimized, setMinimized] = useState(false);
   const [size, setSize] = useState<PanelSize>("medium");
@@ -122,11 +124,11 @@ export function RuntimeStatusPanel({
   }, [paths.workspaceRoot]);
 
   useEffect(() => {
-    if (!paths.workspaceRoot || !paths.logFilePath) return;
+    if (!developerMode || !paths.workspaceRoot || !paths.logFilePath) return;
     refreshLogs();
     const t = setInterval(refreshLogs, 3000);
     return () => clearInterval(t);
-  }, [paths.workspaceRoot, paths.logFilePath, refreshLogs]);
+  }, [developerMode, paths.workspaceRoot, paths.logFilePath, refreshLogs]);
 
   const handleOpenLogFolder = useCallback(() => {
     if (!paths.logFilePath) return;
@@ -298,7 +300,7 @@ export function RuntimeStatusPanel({
               </>
             )}
           </div>
-          {(ggufPathMissing || lastError || lastResult != null || createLogDirResult != null) && (
+          {(ggufPathMissing || lastError || lastResult != null || (developerMode && createLogDirResult != null)) && (
             <div className="runtime-status-extra">
               {ggufPathMissing && (
                 <div className="runtime-status-row runtime-status-error">
@@ -318,7 +320,7 @@ export function RuntimeStatusPanel({
                   <span className="runtime-status-value">{lastResult}</span>
                 </div>
               )}
-              {createLogDirResult != null && (
+              {developerMode && createLogDirResult != null && (
                 <div className="runtime-status-row runtime-status-create-log-result">
                   <span className="runtime-status-value">{createLogDirResult}</span>
                 </div>
@@ -342,22 +344,28 @@ export function RuntimeStatusPanel({
             >
               Refresh
             </button>
-            <button
-              type="button"
-              className="btn secondary"
-              disabled={!logRoot}
-              onClick={handleCreateLogDir}
-            >
-              Create log dir
-            </button>
-            <button
-              type="button"
-              className="btn secondary"
-              onClick={handleCopyDebugInfo}
-            >
-              Copy debug info
-            </button>
+            {developerMode && (
+              <>
+                <button
+                  type="button"
+                  className="btn secondary"
+                  disabled={!logRoot}
+                  onClick={handleCreateLogDir}
+                >
+                  Create log dir
+                </button>
+                <button
+                  type="button"
+                  className="btn secondary"
+                  onClick={handleCopyDebugInfo}
+                >
+                  Copy debug info
+                </button>
+              </>
+            )}
           </div>
+          {developerMode && (
+            <>
           <div className="runtime-status-log-wrap">
             <div className="runtime-status-log-title">Runtime Logs</div>
             <div className="runtime-status-log-actions">
@@ -403,6 +411,8 @@ export function RuntimeStatusPanel({
               </div>
             )}
           </div>
+            </>
+          )}
         </div>
       )}
     </div>

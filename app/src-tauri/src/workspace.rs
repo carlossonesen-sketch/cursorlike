@@ -3,6 +3,7 @@
 use chrono::{DateTime, TimeZone, Utc};
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::process::{Command, Stdio};
 use std::path::{Path, PathBuf};
 
 fn normalize_rel(s: &str) -> PathBuf {
@@ -31,11 +32,28 @@ fn resolve(root: &str, rel: &str) -> Result<PathBuf, String> {
     if rel.contains("..") {
         return Err("path must not escape workspace".into());
     }
+    if Path::new(rel).is_absolute() {
+        return Err("path must be relative to workspace".into());
+    }
     let rel = normalize_rel(rel);
     let root_canon = root.canonicalize().map_err(|e| e.to_string())?;
     let full = root_canon.join(&rel);
     if !full.starts_with(&root_canon) {
         return Err("path escapes workspace root".into());
+    }
+    let mut existing = full.as_path();
+    while !existing.exists() {
+        existing = existing.parent().ok_or_else(|| "path has no existing workspace parent".to_string())?;
+    }
+    let existing_canon = existing.canonicalize().map_err(|e| e.to_string())?;
+    if !existing_canon.starts_with(&root_canon) {
+        return Err("path escapes workspace through a symlink or junction".into());
+    }
+    if full.exists() {
+        let full_canon = full.canonicalize().map_err(|e| e.to_string())?;
+        if !full_canon.starts_with(&root_canon) {
+            return Err("path escapes workspace through a symlink or junction".into());
+        }
     }
     Ok(full)
 }
@@ -61,6 +79,68 @@ pub fn workspace_read_dir(workspace_root: String, path: String) -> Result<Vec<Di
 pub struct DirEntry {
     pub name: String,
     pub is_dir: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandRunResult {
+    pub run_id: String,
+    pub command: String,
+    pub working_directory: String,
+    pub start_timestamp: String,
+    pub end_timestamp: String,
+    pub duration_ms: u64,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+}
+
+fn allowed_project_command(command: &str) -> Option<(&'static str, Vec<&'static str>)> {
+    match command.trim().to_ascii_lowercase().as_str() {
+        "npm run build" => Some(("npm.cmd", vec!["run", "build"])),
+        "npm.cmd run build" => Some(("npm.cmd", vec!["run", "build"])),
+        "pnpm run build" => Some(("pnpm.cmd", vec!["run", "build"])),
+        "yarn build" => Some(("yarn.cmd", vec!["build"])),
+        "cargo build" => Some(("cargo", vec!["build"])),
+        _ => None,
+    }
+}
+
+#[tauri::command]
+pub fn workspace_run_approved_command(
+    workspace_root: String,
+    command: String,
+    run_id: String,
+) -> Result<CommandRunResult, String> {
+    let root = Path::new(&workspace_root);
+    if !root.is_absolute() {
+        return Err("workspace_root must be absolute".into());
+    }
+    let root_canon = root.canonicalize().map_err(|e| e.to_string())?;
+    let (program, args) = allowed_project_command(&command)
+        .ok_or_else(|| format!("Command is not allowed: {}", command))?;
+    let start_timestamp = Utc::now();
+    let started = std::time::Instant::now();
+    let output = Command::new(program)
+        .args(args)
+        .current_dir(root_canon)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| e.to_string())?;
+    let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    let end_timestamp = Utc::now();
+    Ok(CommandRunResult {
+        run_id,
+        command,
+        working_directory: workspace_root,
+        start_timestamp: start_timestamp.to_rfc3339(),
+        end_timestamp: end_timestamp.to_rfc3339(),
+        duration_ms,
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: output.status.code().unwrap_or(-1),
+    })
 }
 
 #[tauri::command]
@@ -259,13 +339,68 @@ fn walk_for_name(
                 .to_lowercase();
             let exact = name_lower == *search_lower || stem == *search_lower;
             let fuzzy = name_lower.contains(search_lower) || stem.contains(search_lower);
-            if exact || fuzzy {
+            let typo = levenshtein_with_limit(&name_lower, search_lower, typo_threshold(search_lower))
+                || levenshtein_with_limit(&stem, search_lower, typo_threshold(search_lower));
+            if exact || fuzzy || typo {
                 let rel_str = rel.join(&name).to_string_lossy().replace('\\', "/");
                 out.push(rel_str);
             }
         }
     }
     Ok(())
+}
+
+#[tauri::command]
+pub fn workspace_delete_file(workspace_root: String, path: String) -> Result<(), String> {
+    let full = resolve(&workspace_root, &path)?;
+    if !full.exists() {
+        return Ok(());
+    }
+    if !full.is_file() {
+        return Err("Refusing to delete a non-file path.".into());
+    }
+    std::fs::remove_file(full).map_err(|e| e.to_string())
+}
+
+fn typo_threshold(value: &str) -> usize {
+    let len = value.chars().count();
+    if len <= 4 {
+        1
+    } else if len <= 8 {
+        2
+    } else {
+        3
+    }
+}
+
+fn levenshtein_with_limit(a: &str, b: &str, limit: usize) -> bool {
+    if a == b {
+        return true;
+    }
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    if a_chars.len().abs_diff(b_chars.len()) > limit {
+        return false;
+    }
+
+    let mut prev: Vec<usize> = (0..=b_chars.len()).collect();
+    let mut curr = vec![0usize; b_chars.len() + 1];
+    for (i, a_ch) in a_chars.iter().enumerate() {
+        curr[0] = i + 1;
+        let mut row_min = curr[0];
+        for (j, b_ch) in b_chars.iter().enumerate() {
+            let cost = if a_ch == b_ch { 0 } else { 1 };
+            curr[j + 1] = (curr[j] + 1)
+                .min(prev[j + 1] + 1)
+                .min(prev[j] + cost);
+            row_min = row_min.min(curr[j + 1]);
+        }
+        if row_min > limit {
+            return false;
+        }
+        prev.clone_from_slice(&curr);
+    }
+    prev[b_chars.len()] <= limit
 }
 
 fn sort_search_results(matches: &mut [String], search_lower: &str) {
@@ -276,8 +411,10 @@ fn sort_search_results(matches: &mut [String], search_lower: &str) {
             0u8 // exact filename
         } else if stem == search_lower {
             1 // exact stem
-        } else {
+        } else if name.contains(search_lower) || stem.contains(search_lower) {
             2 // partial
+        } else {
+            3 // typo
         };
         let segments = path.matches(|c| c == '/' || c == '\\').count() + 1;
         (tier, segments, path.len())
@@ -290,6 +427,52 @@ fn sort_search_results(matches: &mut [String], search_lower: &str) {
             .then(a_len.cmp(&b_len))
             .then(a.cmp(b))
     });
+}
+
+#[cfg(test)]
+mod containment_tests {
+    use super::*;
+
+    fn unique_temp(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("nf-{name}-{}-{}", std::process::id(), Utc::now().timestamp_nanos_opt().unwrap_or_default()))
+    }
+
+    #[test]
+    fn resolve_rejects_traversal_and_absolute_paths() {
+        let root = unique_temp("containment");
+        std::fs::create_dir_all(&root).unwrap();
+        let root_string = root.to_string_lossy().into_owned();
+        assert!(resolve(&root_string, "../escape.txt").is_err());
+        assert!(resolve(&root_string, "C:\\Windows\\win.ini").is_err());
+        assert!(resolve(&root_string, "src/main.ts").is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn resolve_rejects_windows_junction_escape() {
+        let root = unique_temp("junction-root");
+        let outside = unique_temp("junction-outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"outside").unwrap();
+        let junction = root.join("linked");
+        let output = Command::new("cmd")
+            .args([
+                "/c",
+                "mklink",
+                "/J",
+                junction.to_string_lossy().as_ref(),
+                outside.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "junction creation failed: {}", String::from_utf8_lossy(&output.stderr));
+        let root_string = root.to_string_lossy().into_owned();
+        assert!(resolve(&root_string, "linked/secret.txt").is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::remove_dir_all(&outside).unwrap();
+    }
 }
 
 // --- Snapshot walk ---
