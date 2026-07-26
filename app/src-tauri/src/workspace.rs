@@ -24,7 +24,7 @@ fn normalize_rel(s: &str) -> PathBuf {
 
 /// Resolve relative path under workspace root. Fails if path escapes root.
 /// Does not require target to exist (for write/exists).
-fn resolve(root: &str, rel: &str) -> Result<PathBuf, String> {
+pub(crate) fn resolve(root: &str, rel: &str) -> Result<PathBuf, String> {
     let root = Path::new(root);
     if !root.is_absolute() {
         return Err("workspace_root must be absolute".into());

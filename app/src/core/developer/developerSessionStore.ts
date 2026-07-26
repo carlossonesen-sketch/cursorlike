@@ -1,16 +1,27 @@
 import { invoke } from "@tauri-apps/api/core";
 import { createDeveloperSessionState, type DeveloperSessionState } from "./developerState";
 
-const DEVELOPER_SESSION_PATH = ".devassistant/developer-session.json";
-
 export async function readDeveloperSession(workspaceRoot: string): Promise<DeveloperSessionState> {
   try {
-    const raw = await invoke<string>("workspace_read_file", {
-      workspaceRoot,
-      path: DEVELOPER_SESSION_PATH,
+    const value = await invoke<unknown>("developer_read_session", {
+      workspacePath: workspaceRoot,
     });
-    const parsed = JSON.parse(raw) as DeveloperSessionState;
-    return parsed?.schemaVersion === 1 ? parsed : createDeveloperSessionState();
+    if (!value) return createDeveloperSessionState();
+    const parsed = value as Omit<DeveloperSessionState, "schemaVersion"> & {
+      schemaVersion?: number;
+      selectedRangeContexts?: DeveloperSessionState["selectedRangeContexts"];
+      editorDrafts?: DeveloperSessionState["editorDrafts"];
+    };
+    if (parsed?.schemaVersion === 1 || parsed?.schemaVersion === 2) {
+      return {
+        ...createDeveloperSessionState(),
+        ...parsed,
+        schemaVersion: 2,
+        selectedRangeContexts: parsed.selectedRangeContexts ?? [],
+        editorDrafts: parsed.editorDrafts ?? {},
+      };
+    }
+    return createDeveloperSessionState();
   } catch {
     return createDeveloperSessionState();
   }
@@ -20,10 +31,8 @@ export async function writeDeveloperSession(
   workspaceRoot: string,
   state: DeveloperSessionState
 ): Promise<void> {
-  await invoke("workspace_mkdir_all", { workspaceRoot, path: ".devassistant" });
-  await invoke("workspace_write_file", {
-    workspaceRoot,
-    path: DEVELOPER_SESSION_PATH,
-    content: JSON.stringify({ ...state, updatedAt: new Date().toISOString() }, null, 2),
+  await invoke("developer_write_session", {
+    workspacePath: workspaceRoot,
+    session: { ...state, updatedAt: new Date().toISOString() },
   });
 }

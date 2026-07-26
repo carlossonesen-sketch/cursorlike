@@ -1,10 +1,17 @@
+mod ai_credentials;
 mod developer;
+mod developer_agent;
+mod developer_agent_loop;
+mod developer_changes;
+mod developer_config;
 mod downloads;
 mod openai_backend;
 mod project_root;
 mod runtime;
 mod toolroot;
 mod workspace;
+
+pub use openai_backend::{test_openai_connectivity_backend, OpenAiConnectivityResult};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -14,6 +21,8 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .manage(std::sync::Mutex::new(runtime::RuntimeState::default()))
         .manage(developer::DeveloperCommandRegistry::default())
+        .manage(developer_agent::DeveloperAgentRegistry::default())
+        .manage(developer_changes::DeveloperChangeStore::default())
         .invoke_handler(tauri::generate_handler![
             workspace::workspace_read_dir,
             workspace::workspace_read_file,
@@ -34,7 +43,30 @@ pub fn run() {
             developer::developer_search_repository,
             developer::developer_run_approved_command,
             developer::developer_cancel_command,
+            developer_agent::developer_agent_start,
+            developer_agent::developer_agent_approve,
+            developer_agent::developer_agent_reject,
+            developer_agent::developer_agent_revert,
+            developer_agent::developer_agent_stop,
+            developer_agent::developer_agent_get,
+            developer_changes::developer_changes_propose,
+            developer_changes::developer_changes_apply,
+            developer_changes::developer_changes_reject,
+            developer_changes::developer_changes_revert,
+            developer_changes::developer_changes_list,
+            developer_config::developer_recent_workspaces,
+            developer_config::developer_record_recent_workspace,
+            developer_config::developer_remove_recent_workspace,
+            developer_config::developer_get_provider_settings,
+            developer_config::developer_set_provider_settings,
+            developer_config::developer_provider_diagnostics,
+            developer_config::developer_read_session,
+            developer_config::developer_write_session,
+            developer_config::developer_list_friction,
+            developer_config::developer_save_friction,
+            developer_config::developer_remove_friction,
             openai_backend::openai_generate,
+            openai_backend::openai_test_connectivity,
             project_root::detect_project_root,
             toolroot::find_tool_root,
             toolroot::get_global_models_dir,

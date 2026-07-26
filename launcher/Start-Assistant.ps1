@@ -5,7 +5,7 @@ $ErrorActionPreference = "Stop"
 $LauncherDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root        = Split-Path -Parent $LauncherDir
 $AppDir      = Join-Path $Root "app\src-tauri\target\release"
-$Exe     = Join-Path $AppDir "devassistant-cursor-light.exe"
+$Exe     = Join-Path $AppDir "nf.exe"
 $Tools   = Join-Path $Root "tools"
 $Log     = Join-Path $Root "Start-Assistant.log"
 
@@ -21,7 +21,7 @@ function Prepend-Path($p) {
   }
 }
 
-Log "===== DevAssistant Launcher ====="
+Log "===== NF Launcher ====="
 
 Prepend-Path (Join-Path $Tools "git\cmd")
 Prepend-Path (Join-Path $Tools "ffmpeg\bin")

@@ -7,6 +7,9 @@ const host = process.env.TAURI_DEV_HOST;
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [react()],
+  // Never expose legacy VITE_-prefixed secrets to the WebView. Public frontend
+  // values must use the intentionally separate NF_PUBLIC_ prefix.
+  envPrefix: "NF_PUBLIC_",
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

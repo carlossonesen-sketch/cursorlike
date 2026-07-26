@@ -2760,6 +2760,25 @@
 .developer-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .primary-settings { padding: 30px; }
 
+.developer-hunk {
+  display: block;
+  margin: 0.75rem 0;
+  padding: 0.75rem;
+  border: 1px solid #334155;
+  border-radius: 0.5rem;
+}
+
+.developer-hunk pre { max-height: 14rem; overflow: auto; }
+.developer-recents > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.35rem 0.75rem;
+  margin: 0.5rem 0;
+}
+.developer-recents small { overflow-wrap: anywhere; }
+.settings-route { max-width: 58rem; margin: 0 auto; padding: 2rem; }
+.settings-route label { display: grid; gap: 0.35rem; margin: 1rem 0; }
+
 @media (max-width: 820px) {
   .developer-layout { grid-template-columns: 1fr; }
   .developer-sidebar { flex-direction: row; overflow: auto; border-right: 0; border-bottom: 1px solid #293247; }

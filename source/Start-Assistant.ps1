@@ -1,11 +1,11 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 [CmdletBinding()] param()
 $ErrorActionPreference = "Stop"
 
 # Paths
 $Root   = Split-Path -Parent $MyInvocation.MyCommand.Path
-$AppDir = Join-Path $Root "DevAssistant"
-$Exe    = Join-Path $AppDir "DevAssistant.exe"
+$AppDir = Join-Path $Root "NF"
+$Exe    = Join-Path $AppDir "NF.exe"
 $Tools  = Join-Path $Root "tools"
 $Log    = Join-Path $Root "Start-Assistant.log"
 
@@ -86,7 +86,7 @@ if (-not $haveWinget -and $ONLINE) {
 
 # Prompt user for install mode (lightweight tools by default)
 Write-Host ""
-Write-Host "Dev Assistant setup" -ForegroundColor Cyan
+Write-Host "NF setup" -ForegroundColor Cyan
 Write-Host "This will check for tools and install if missing (or use portable copies if offline)." -ForegroundColor Gray
 Write-Host ""
 Write-Host "Choose: [Y] Git & FFmpeg  [A] All common dev tools  [N] None (use portable copies if present)" -ForegroundColor Yellow
@@ -112,7 +112,7 @@ if ($doAll) {
 
 # Summary
 Write-Host ""
-Write-Host "READY. Launching Dev Assistant..." -ForegroundColor Green
+Write-Host "READY. Launching NF..." -ForegroundColor Green
 Log "Launching EXE: $Exe"
 if (-not (Test-Path $Exe)) { 
   Write-Host "ERROR: $Exe not found." -ForegroundColor Red

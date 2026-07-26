@@ -1,13 +1,13 @@
-﻿========================
-Dev Assistant (Portable)
+========================
+NF / Never Finished (Portable)
 ========================
 
 WHAT’S IN THE ZIP
 -----------------
-- DevAssistant\DevAssistant.exe  → the app
+- NF\NF.exe  -> the app
 - Start-Assistant.cmd (recommended) / Start-Assistant.ps1
-- tools\  → optional portable copies of Git/FFmpeg/etc. (use offline)
-- Start-Assistant.log  → launch/install log (created on first run)
+- tools\  -> optional portable copies of Git/FFmpeg/etc. (use offline)
+- Start-Assistant.log  -> launch/install log (created on first run)
 
 QUICK START (MOST USERS)
 ------------------------
@@ -21,8 +21,8 @@ QUICK START (MOST USERS)
 
 IF WINDOWS BLOCKS THE SCRIPT
 ----------------------------
-- SmartScreen on EXE: click **More info → Run anyway**.
-- PowerShell policy: right-click the folder → **Open PowerShell window here**, then run:
+- SmartScreen on EXE: click **More info -> Run anyway**.
+- PowerShell policy: right-click the folder -> **Open PowerShell window here**, then run:
   powershell -ExecutionPolicy Bypass -NoProfile -File .\Start-Assistant.ps1
 
 OFFLINE / NO-INTERNET MODE
@@ -42,24 +42,24 @@ TROUBLESHOOTING QUICKIES
 - Nothing happens?  Open **Start-Assistant.log** in the same folder and read the last lines.
 - Test the PowerShell launcher directly:
   powershell -ExecutionPolicy Bypass -NoProfile -File .\Start-Assistant.ps1
-- EXE missing after extraction?  Ensure the folder contains: DevAssistant\DevAssistant.exe
+- EXE missing after extraction?  Ensure the folder contains: NF\NF.exe
 - “git/ffprobe not found”: choose [Y] or [A] on first run (online), or place portable copies in tools\ as above.
 - UI looks idle during big scans: watch the status bar; use **Cancel Task** to stop a long scan.
 
 BASIC USE INSIDE THE APP
 ------------------------
-1) **Browse Project** → select your app repo.
-2) **Deep Scan** → indexes files (code + configs + docs).
+1) **Browse Project** -> select your app repo.
+2) **Deep Scan** -> indexes files (code + configs + docs).
 3) Type a request (plain English), e.g.:
    - “add sticker gifts to livestream UI with coin deduction + daily cap”
    - “fix KeyError in analytics and add a unit test”
-4) Click **Propose (Pretrained)** → review the diff → **Apply Proposed**.
+4) Click **Propose (Pretrained)** -> review the diff -> **Apply Proposed**.
 5) Click **Run Tests (smart)** to execute the detected test tool (Flutter/Jest/Pytest/etc.).
 
 HANDY COMMANDS (Power Users)
 ----------------------------
 # Expand the ZIP manually to a test folder:
-Expand-Archive .\DevAssistant_Portable.zip -DestinationPath .\_test -Force
+Expand-Archive .\NF_Portable.zip -DestinationPath .\_test -Force
 
 # Run the PS1 directly with policy bypass:
 powershell -ExecutionPolicy Bypass -NoProfile -File .\Start-Assistant.ps1
@@ -68,7 +68,7 @@ powershell -ExecutionPolicy Bypass -NoProfile -File .\Start-Assistant.ps1
 Get-Content .\Start-Assistant.log -Tail 200
 
 # Launch EXE directly (bypass scripts altogether):
-.\DevAssistant\DevAssistant.exe
+.\NF\NF.exe
 
 NOTES
 -----

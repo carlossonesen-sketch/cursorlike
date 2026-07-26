@@ -10,8 +10,21 @@ use tauri::{AppHandle, Emitter, State};
 
 const OUTPUT_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 const SEARCH_LIMIT: usize = 200;
+const SEARCH_SCAN_LIMIT: usize = 100_000;
 const SEARCH_FILE_LIMIT: u64 = 2 * 1024 * 1024;
-const IGNORED_DIRS: &[&str] = &[".git", "node_modules", "target", "dist", "build", ".next", ".devassistant"];
+const IGNORED_DIRS: &[&str] = &[
+    ".git",
+    ".dart_tool",
+    ".gradle",
+    ".idea",
+    ".next",
+    ".devassistant",
+    "node_modules",
+    "Pods",
+    "target",
+    "dist",
+    "build",
+];
 
 pub struct DeveloperCommandRegistry {
     runs: Arc<Mutex<HashMap<String, ActiveRun>>>,
@@ -67,10 +80,31 @@ struct DeveloperOutputEvent {
 #[serde(rename_all = "camelCase")]
 pub struct DeveloperWorkspaceInfo {
     pub canonical_path: String,
+    pub repository_name: String,
     pub branch: String,
+    pub head: String,
     pub dirty: bool,
     pub status: String,
     pub diff: String,
+    pub profile: DeveloperWorkspaceProfile,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeveloperWorkspaceProfile {
+    pub project_type: String,
+    pub project_name: Option<String>,
+    pub flutter_sdk_available: bool,
+    pub dart_sdk_available: bool,
+    pub suggested_commands: Vec<DeveloperSuggestedCommand>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeveloperSuggestedCommand {
+    pub label: String,
+    pub command: String,
+    pub permitted: bool,
 }
 
 #[derive(Serialize)]
@@ -119,6 +153,74 @@ fn run_git(root: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+fn executable_available(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else { return false };
+    let extensions: Vec<String> = if cfg!(windows) {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
+            .split(';')
+            .map(|value| value.to_ascii_lowercase())
+            .collect()
+    } else {
+        vec![String::new()]
+    };
+    std::env::split_paths(&path).any(|directory| {
+        extensions.iter().any(|extension| {
+            directory.join(format!("{name}{extension}")).is_file()
+                || directory.join(name).is_file()
+        })
+    })
+}
+
+fn parse_pubspec_name(root: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(root.join("pubspec.yaml")).ok()?;
+    text.lines().find_map(|line| {
+        let trimmed = line.trim();
+        if line.chars().next().is_some_and(char::is_whitespace) || !trimmed.starts_with("name:") {
+            return None;
+        }
+        let value = trimmed.strip_prefix("name:")?.trim().trim_matches(['\'', '"']);
+        if !value.is_empty()
+            && value.len() <= 100
+            && value.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+        {
+            Some(value.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn workspace_profile(root: &Path) -> DeveloperWorkspaceProfile {
+    let flutter = root.join("pubspec.yaml").is_file()
+        && root.join("lib").is_dir()
+        && (root.join("android").is_dir() || root.join("ios").is_dir());
+    let commands = if flutter {
+        [
+            ("Get dependencies", "flutter pub get"),
+            ("Analyze", "flutter analyze"),
+            ("Run tests", "flutter test"),
+            ("Check formatting", "dart format --output=none --set-exit-if-changed lib"),
+        ]
+        .into_iter()
+        .map(|(label, command)| DeveloperSuggestedCommand {
+            label: label.into(),
+            command: command.into(),
+            permitted: resolve_command(command, Some(root)).is_ok(),
+        })
+        .collect()
+    } else {
+        Vec::new()
+    };
+    DeveloperWorkspaceProfile {
+        project_type: if flutter { "Flutter" } else { "Unknown" }.into(),
+        project_name: if flutter { parse_pubspec_name(root) } else { None },
+        flutter_sdk_available: executable_available("flutter"),
+        dart_sdk_available: executable_available("dart"),
+        suggested_commands: commands,
+    }
+}
+
 #[tauri::command]
 pub fn developer_inspect_workspace(workspace_root: String) -> Result<DeveloperWorkspaceInfo, String> {
     let root = canonical_workspace(&workspace_root)?;
@@ -127,18 +229,25 @@ pub fn developer_inspect_workspace(workspace_root: String) -> Result<DeveloperWo
     let explicit_branch = run_git(&root, &["branch", "--show-current"]).unwrap_or_default().trim().to_string();
     let (status_branch, dirty) = parse_git_status(&status);
     let branch = if explicit_branch.is_empty() { status_branch } else { explicit_branch };
+    let head = run_git(&root, &["rev-parse", "HEAD"])?.trim().to_string();
     let diff = run_git(&root, &["diff", "--no-ext-diff", "--"]).unwrap_or_default();
+    let repository_name = root.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root.to_string_lossy().into_owned());
     Ok(DeveloperWorkspaceInfo {
         canonical_path: root.to_string_lossy().into_owned(),
+        repository_name,
         branch,
+        head,
         dirty,
         status,
         diff,
+        profile: workspace_profile(&root),
     })
 }
 
 fn walk_repository(root: &Path, dir: &Path, output: &mut Vec<PathBuf>) -> Result<(), String> {
-    if output.len() >= SEARCH_LIMIT {
+    if output.len() >= SEARCH_SCAN_LIMIT {
         return Ok(());
     }
     for entry in std::fs::read_dir(dir).map_err(|error| error.to_string())? {
@@ -159,7 +268,7 @@ fn walk_repository(root: &Path, dir: &Path, output: &mut Vec<PathBuf>) -> Result
             }
         } else if file_type.is_file() {
             output.push(canonical);
-            if output.len() >= SEARCH_LIMIT {
+            if output.len() >= SEARCH_SCAN_LIMIT {
                 break;
             }
         }
@@ -187,6 +296,9 @@ pub fn developer_search_repository(
         if mode == "filename" {
             if relative_string.to_lowercase().contains(&needle) {
                 matches.push(RepositorySearchMatch { path: relative_string, line: None, preview: None });
+                if matches.len() >= SEARCH_LIMIT {
+                    return Ok(matches);
+                }
             }
             continue;
         }
@@ -218,26 +330,126 @@ pub fn developer_search_repository(
     Ok(matches)
 }
 
-fn command_policy(command: &str) -> Option<(&'static str, Vec<&'static str>)> {
-    match command.trim().to_ascii_lowercase().as_str() {
-        "npm run build" | "npm.cmd run build" => Some(("npm.cmd", vec!["run", "build"])),
-        "npm test" | "npm run test" | "npm.cmd test" | "npm.cmd run test" => Some(("npm.cmd", vec!["test"])),
-        "npm run lint" | "npm.cmd run lint" => Some(("npm.cmd", vec!["run", "lint"])),
-        "npm run typecheck" | "npm.cmd run typecheck" => Some(("npm.cmd", vec!["run", "typecheck"])),
-        "npm run check" | "npm.cmd run check" => Some(("npm.cmd", vec!["run", "check"])),
-        "pnpm run build" => Some(("pnpm.cmd", vec!["run", "build"])),
-        "pnpm test" => Some(("pnpm.cmd", vec!["test"])),
-        "yarn build" => Some(("yarn.cmd", vec!["build"])),
-        "yarn test" => Some(("yarn.cmd", vec!["test"])),
-        "cargo check" => Some(("cargo", vec!["check"])),
-        "cargo build" => Some(("cargo", vec!["build"])),
-        "cargo test" => Some(("cargo", vec!["test"])),
-        "git status --short --branch" => Some(("git", vec!["status", "--short", "--branch"])),
-        "git diff" => Some(("git", vec!["diff", "--no-ext-diff", "--"])),
-        "git diff --stat" => Some(("git", vec!["diff", "--stat", "--"])),
-        "git log -n 20 --oneline" => Some(("git", vec!["log", "-n", "20", "--oneline"])),
-        _ => None,
+pub(crate) struct ResolvedCommand {
+    pub(crate) program: String,
+    pub(crate) args: Vec<String>,
+}
+
+fn tokenize_command(command: &str) -> Result<Vec<String>, String> {
+    if command.trim() != command || command.is_empty() || command.contains(['\r', '\n', '\0']) {
+        return Err("Command contains leading, trailing, or hidden tokens.".into());
     }
+    if command.chars().any(|character| matches!(character, '&' | '|' | '>' | '<' | ';' | '`' | '$')) {
+        return Err("Shell metacharacters, interpolation, pipes, and redirection are not permitted.".into());
+    }
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut quote = None;
+    for character in command.chars() {
+        if let Some(active) = quote {
+            if character == active {
+                quote = None;
+            } else {
+                token.push(character);
+            }
+        } else if matches!(character, '\'' | '"') {
+            quote = Some(character);
+        } else if character.is_whitespace() {
+            if !token.is_empty() {
+                tokens.push(std::mem::take(&mut token));
+            }
+        } else {
+            token.push(character);
+        }
+    }
+    if quote.is_some() {
+        return Err("Command contains an unterminated quote.".into());
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    if tokens.is_empty() {
+        return Err("Command is empty.".into());
+    }
+    Ok(tokens)
+}
+
+fn validate_format_target(root: &Path, target: &str) -> Result<String, String> {
+    let relative = Path::new(target);
+    if target.is_empty() || relative.is_absolute() || relative.components().any(|part| matches!(part, std::path::Component::ParentDir)) {
+        return Err("Dart format target must be an explicit workspace-relative path without '..'.".into());
+    }
+    let canonical = root.join(relative).canonicalize()
+        .map_err(|_| "Dart format target must already exist inside the workspace.".to_string())?;
+    if !canonical.starts_with(root) {
+        return Err("Dart format target escapes the canonical workspace.".into());
+    }
+    Ok(relative.to_string_lossy().into_owned())
+}
+
+pub(crate) fn resolve_command(command: &str, root: Option<&Path>) -> Result<ResolvedCommand, String> {
+    let tokens = tokenize_command(command)?;
+    let lower: Vec<String> = tokens.iter().map(|token| token.to_ascii_lowercase()).collect();
+    let exact = |program: &str, args: &[&str]| ResolvedCommand {
+        program: program.into(),
+        args: args.iter().map(|value| (*value).into()).collect(),
+    };
+    let resolved = match lower.as_slice() {
+        [program, run, action] if matches!(program.as_str(), "npm" | "npm.cmd")
+            && run == "run" && matches!(action.as_str(), "build" | "lint" | "typecheck" | "check") =>
+            exact("npm.cmd", &["run", action]),
+        [program, action] if matches!(program.as_str(), "npm" | "npm.cmd") && action == "test" =>
+            exact("npm.cmd", &["test"]),
+        [program, run, action] if matches!(program.as_str(), "npm" | "npm.cmd") && run == "run" && action == "test" =>
+            exact("npm.cmd", &["test"]),
+        [program, run, action] if program == "pnpm" && run == "run" && action == "build" =>
+            exact("pnpm.cmd", &["run", "build"]),
+        [program, action] if program == "pnpm" && action == "test" => exact("pnpm.cmd", &["test"]),
+        [program, action] if program == "yarn" && matches!(action.as_str(), "build" | "test") =>
+            exact("yarn.cmd", &[action]),
+        [program, action] if program == "cargo" && matches!(action.as_str(), "check" | "build" | "test") =>
+            exact("cargo", &[action]),
+        [program, flag] if program == "flutter" && flag == "--version" => exact("flutter", &["--version"]),
+        [program, doctor] if program == "flutter" && doctor == "doctor" => exact("flutter", &["doctor"]),
+        [program, doctor, verbose] if program == "flutter" && doctor == "doctor" && verbose == "-v" =>
+            exact("flutter", &["doctor", "-v"]),
+        [program, pub_arg, get] if program == "flutter" && pub_arg == "pub" && get == "get" =>
+            exact("flutter", &["pub", "get"]),
+        [program, action] if program == "flutter" && matches!(action.as_str(), "analyze" | "test") =>
+            exact("flutter", &[action]),
+        [program, flag] if program == "dart" && flag == "--version" => exact("dart", &["--version"]),
+        [program, action] if program == "dart" && action == "analyze" => exact("dart", &["analyze"]),
+        [program, format, target] if program == "dart" && format == "format" => {
+            let root = root.ok_or_else(|| "Workspace is required for a Dart format target.".to_string())?;
+            ResolvedCommand { program: "dart".into(), args: vec!["format".into(), validate_format_target(root, target)?] }
+        }
+        [program, format, output, changed, target]
+            if program == "dart" && format == "format" && output == "--output=none"
+                && changed == "--set-exit-if-changed" => {
+            let root = root.ok_or_else(|| "Workspace is required for a Dart format target.".to_string())?;
+            ResolvedCommand {
+                program: "dart".into(),
+                args: vec!["format".into(), "--output=none".into(), "--set-exit-if-changed".into(), validate_format_target(root, target)?],
+            }
+        }
+        [program, status, short] if program == "git" && status == "status" && short == "--short" =>
+            exact("git", &["status", "--short"]),
+        [program, status, short, branch] if program == "git" && status == "status" && short == "--short" && branch == "--branch" =>
+            exact("git", &["status", "--short", "--branch"]),
+        [program, branch, current] if program == "git" && branch == "branch" && current == "--show-current" =>
+            exact("git", &["branch", "--show-current"]),
+        [program, diff] if program == "git" && diff == "diff" =>
+            exact("git", &["diff", "--no-ext-diff", "--"]),
+        [program, diff, option] if program == "git" && diff == "diff" && option == "--stat" =>
+            exact("git", &["diff", "--stat", "--"]),
+        [program, diff, option] if program == "git" && diff == "diff" && option == "--check" =>
+            exact("git", &["diff", "--check", "--"]),
+        [program, log, count, amount, oneline]
+            if program == "git" && log == "log" && count == "-n" && amount == "20" && oneline == "--oneline" =>
+            exact("git", &["log", "-n", "20", "--oneline"]),
+        _ => return Err(format!("Command is not in the structured Developer Mode policy: {command}")),
+    };
+    Ok(resolved)
 }
 
 fn validate_command_request(request: &DeveloperCommandRequest) -> Result<(), String> {
@@ -246,12 +458,6 @@ fn validate_command_request(request: &DeveloperCommandRequest) -> Result<(), Str
     }
     if request.purpose.trim().is_empty() || request.risk.trim().is_empty() {
         return Err("Command purpose and risk are required.".into());
-    }
-    if command_policy(&request.command).is_none() {
-        return Err(format!(
-            "Command is not in the exact Developer Mode policy: {}",
-            request.command
-        ));
     }
     Ok(())
 }
@@ -339,13 +545,12 @@ fn run_approved_command_blocking(
     app: AppHandle,
     runs_registry: Arc<Mutex<HashMap<String, ActiveRun>>>,
 ) -> Result<DeveloperCommandResult, String> {
-    validate_command_request(&request)?;
     let root = canonical_workspace(&request.workspace_root)?;
-    let (program, args) = command_policy(&request.command)
-        .ok_or_else(|| format!("Command is not in the exact Developer Mode policy: {}", request.command))?;
+    validate_command_request(&request)?;
+    let resolved = resolve_command(&request.command, Some(&root))?;
     let timeout_ms = request.timeout_ms.clamp(1_000, 30 * 60 * 1_000);
-    let mut child = Command::new(program)
-        .args(args)
+    let mut child = Command::new(&resolved.program)
+        .args(&resolved.args)
         .current_dir(&root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -417,11 +622,63 @@ mod tests {
 
     #[test]
     fn exact_command_policy_rejects_shell_composition_and_install() {
-        assert!(command_policy("npm run build").is_some());
-        assert!(command_policy("cargo test").is_some());
-        assert!(command_policy("npm install").is_none());
-        assert!(command_policy("npm run build && whoami").is_none());
-        assert!(command_policy("git push").is_none());
+        let root = std::env::current_dir().unwrap();
+        assert!(resolve_command("npm run build", Some(&root)).is_ok());
+        assert!(resolve_command("cargo test", Some(&root)).is_ok());
+        assert!(resolve_command("npm install", Some(&root)).is_err());
+        assert!(resolve_command("npm run build && whoami", Some(&root)).is_err());
+        assert!(resolve_command("git push", Some(&root)).is_err());
+    }
+
+    #[test]
+    fn curated_flutter_dart_and_git_commands_are_exact() {
+        let root = std::env::temp_dir().join(format!("nf-command-policy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(root.join("lib/main.dart"), "void main() {}\n").unwrap();
+        let canonical = root.canonicalize().unwrap();
+        for command in [
+            "flutter --version", "flutter doctor", "flutter doctor -v", "dart --version",
+            "flutter pub get", "flutter analyze", "dart analyze", "flutter test",
+            "dart format lib", "dart format lib/main.dart",
+            "dart format --output=none --set-exit-if-changed lib",
+            "git status --short", "git status --short --branch", "git branch --show-current",
+            "git diff", "git diff --stat", "git diff --check",
+        ] {
+            assert!(resolve_command(command, Some(&canonical)).is_ok(), "expected permitted: {command}");
+        }
+        for command in [
+            "flutter run", "flutter build", "flutter clean", "flutter pub upgrade",
+            "dart fix --apply", "dart format", "dart format --line-length 120 lib",
+            "dart format ..", "dart format C:\\other-project", "dart format lib && git status",
+            "dart format lib | more", "dart format $(malicious)", "dart format lib > out.txt",
+            "git commit", "git push", "git checkout main", "git reset --hard",
+            "git restore .", "git clean -fd", "git stash", "git merge main", "git rebase main",
+            "flutter analyze extra", "flutterx analyze", "git status --short hidden",
+            "git status --short\nwhoami", "\"flutter analyze && git status\"",
+        ] {
+            assert!(resolve_command(command, Some(&canonical)).is_err(), "expected rejected: {command}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dart_format_rejects_windows_junction_escape() {
+        let root = std::env::temp_dir().join(format!("nf-command-junction-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("nf-command-outside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let status = Command::new("cmd")
+            .args(["/C", "mklink", "/J", root.join("escape").to_str().unwrap(), outside.to_str().unwrap()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(resolve_command("dart format escape", Some(&root.canonicalize().unwrap())).is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::remove_dir_all(&outside).unwrap();
     }
 
     #[test]
@@ -491,5 +748,121 @@ mod tests {
         assert_eq!(text[0].line, Some(1));
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn flutter_profile_is_generic_and_does_not_execute_commands() {
+        let root = std::env::temp_dir().join(format!("nf-flutter-profile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::create_dir_all(root.join("android")).unwrap();
+        std::fs::write(root.join("pubspec.yaml"), "name: sample_flutter_app\nversion: 1.0.0\n").unwrap();
+        let canonical = root.canonicalize().unwrap();
+        let profile = workspace_profile(&canonical);
+        assert_eq!(profile.project_type, "Flutter");
+        assert_eq!(profile.project_name.as_deref(), Some("sample_flutter_app"));
+        assert_eq!(profile.suggested_commands.len(), 4);
+        assert!(profile.suggested_commands.iter().all(|command| command.permitted));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn configured_real_repository_can_be_inspected_without_writes() {
+        let Ok(root) = std::env::var("NF_DEVELOPER_VALIDATION_REPOSITORY") else {
+            return;
+        };
+        let info = developer_inspect_workspace(root.clone()).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(&info.canonical_path).unwrap(),
+            std::fs::canonicalize(&root).unwrap()
+        );
+        assert!(!info.branch.trim().is_empty());
+        assert!(!info.head.trim().is_empty());
+        assert!(!info.repository_name.trim().is_empty());
+        let pubspec = developer_search_repository(
+            root.clone(),
+            "pubspec.yaml".into(),
+            "filename".into(),
+        )
+        .unwrap();
+        assert!(pubspec.iter().any(|entry| entry.path == "pubspec.yaml"));
+        let markdown = developer_search_repository(root.clone(), ".md".into(), "filename".into()).unwrap();
+        assert!(!markdown.is_empty());
+        let dart = developer_search_repository(root, "main.dart".into(), "filename".into()).unwrap();
+        assert!(dart.iter().any(|entry| entry.path.ends_with("main.dart")));
+        assert_eq!(info.profile.project_type, "Flutter");
+        assert!(info.profile.project_name.is_some());
+        assert!(info.profile.suggested_commands.iter().all(|command| command.permitted));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_process_reports_nonzero_exit_and_enforces_cwd() {
+        let root = std::env::temp_dir().join(format!("nf-command-cwd-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let output = Command::new("cmd.exe")
+            .args(["/D", "/C", "cd & exit /b 7"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(7));
+        let cwd = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        assert_eq!(
+            std::fs::canonicalize(cwd).unwrap(),
+            std::fs::canonicalize(&root).unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_cancellation_terminates_descendant_process_tree() {
+        let root = std::env::temp_dir().join(format!("nf-command-tree-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let pid_file = root.join("child.pid");
+        let script = format!(
+            "$child=Start-Process ping.exe -ArgumentList '127.0.0.1','-n','120' -PassThru; \
+             Set-Content -LiteralPath '{}' -Value $child.Id; Wait-Process -Id $child.Id",
+            pid_file.to_string_lossy().replace('\'', "''")
+        );
+        let mut parent = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .current_dir(&root)
+            .spawn()
+            .unwrap();
+        for _ in 0..100 {
+            if pid_file.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let child_pid: u32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+        terminate_process_tree(parent.id());
+        let _ = parent.wait();
+        std::thread::sleep(Duration::from_millis(150));
+        let tasklist = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {child_pid}"), "/NH"])
+            .output()
+            .unwrap();
+        let listing = String::from_utf8_lossy(&tasklist.stdout);
+        assert!(!listing.contains(&child_pid.to_string()), "descendant process survived cancellation");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_timeout_terminates_process() {
+        let mut child = Command::new("ping.exe")
+            .args(["127.0.0.1", "-n", "120"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        while !should_stop_command(false, started.elapsed(), Duration::from_millis(100)) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        terminate_process_tree(child.id());
+        let status = child.wait().unwrap();
+        assert!(!status.success());
     }
 }

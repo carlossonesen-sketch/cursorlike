@@ -16,6 +16,7 @@ import {
   resumeSuggestion,
   DEFAULT_LOCAL_SETTINGS,
 } from "./core";
+import { lazy, Suspense } from "react";
 import type {
   FileTreeNode,
   FounderManifest,
@@ -90,9 +91,11 @@ import {
 } from "./core/project/projectDashboard";
 import { ProjectDashboard } from "./components/ProjectDashboard";
 import { AppErrorBoundary } from "./components/AppErrorBoundary";
-import { DeveloperWorkspace } from "./components/DeveloperWorkspace";
 import type { PrimaryRoute } from "./core/developer/developerState";
 import "./App.css";
+
+const DeveloperWorkspace = lazy(() => import("./components/DeveloperWorkspace"));
+const SettingsRoute = lazy(() => import("./components/SettingsRoute"));
 
 const workspace = new WorkspaceService();
 
@@ -1662,16 +1665,6 @@ function AutomatedBuilderApp() {
   );
 }
 
-function SettingsRoute() {
-  return (
-    <main className="primary-settings">
-      <h1>Settings</h1>
-      <p>Provider and runtime settings remain managed by the shared NF model/runtime services.</p>
-      <p>Open Automated Builder to configure local models. OpenAI credentials are read only by the Rust backend from <code>OPENAI_API_KEY</code>.</p>
-    </main>
-  );
-}
-
 export default function App() {
   const [primaryRoute, setPrimaryRoute] = useState<PrimaryRoute>("developer");
   return (
@@ -1681,9 +1674,9 @@ export default function App() {
         <button type="button" className={primaryRoute === "builder" ? "active" : ""} onClick={() => setPrimaryRoute("builder")}>Automated Builder</button>
         <button type="button" className={primaryRoute === "settings" ? "active" : ""} onClick={() => setPrimaryRoute("settings")}>Settings</button>
       </nav>
-      {primaryRoute === "developer" && <DeveloperWorkspace />}
+      {primaryRoute === "developer" && <Suspense fallback={<p>Loading Developer workspace…</p>}><DeveloperWorkspace /></Suspense>}
       {primaryRoute === "builder" && <AutomatedBuilderApp />}
-      {primaryRoute === "settings" && <SettingsRoute />}
+      {primaryRoute === "settings" && <Suspense fallback={<p>Loading settings…</p>}><SettingsRoute /></Suspense>}
     </div>
   );
 }

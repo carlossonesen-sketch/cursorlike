@@ -27,14 +27,19 @@ export interface DeveloperCommandState {
   risk: string;
   status: "awaitingApproval" | "running" | "passed" | "failed" | "timedOut" | "cancelled";
   output: string;
+  startedAt?: string;
+  completedAt?: string;
+  durationMs?: number;
   exitCode?: number;
   truncated?: boolean;
 }
 
 export interface DeveloperSessionState {
-  schemaVersion: 1;
+  schemaVersion: 2;
   workspacePath: string | null;
   selectedContextPaths: string[];
+  selectedRangeContexts: { path: string; startLine: number; endLine: number; content: string }[];
+  editorDrafts: Record<string, string>;
   openFilePath: string | null;
   pendingPatch: PlanAndPatch | null;
   pendingSelectedPaths: string[];
@@ -46,9 +51,11 @@ export interface DeveloperSessionState {
 
 export function createDeveloperSessionState(now = new Date().toISOString()): DeveloperSessionState {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     workspacePath: null,
     selectedContextPaths: [],
+    selectedRangeContexts: [],
+    editorDrafts: {},
     openFilePath: null,
     pendingPatch: null,
     pendingSelectedPaths: [],
